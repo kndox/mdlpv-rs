@@ -1,0 +1,26 @@
+[package]
+name = "mdlpv-rs"
+version = "0.1.0"
+edition = "2024"
+description = "Neovim Markdown live preview powered by a small Rust localhost server"
+license = "MIT"
+repository = "https://github.com/kndox/mdlpv-rs"
+readme = "README.md"
+
+[dependencies]
+anyhow = "1"
+ammonia = "4.1.2"
+axum = "0.8"
+clap = { version = "4", features = ["derive"] }
+futures-util = "0.3"
+pulldown-cmark = "0.13"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "2"
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "signal", "sync"] }
+tokio-stream = { version = "0.1", features = ["sync"] }
+tower = "0.5"
+tower-http = { version = "0.6", features = ["fs"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+uuid = { version = "1", features = ["v4", "serde"] }

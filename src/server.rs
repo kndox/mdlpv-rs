@@ -403,30 +403,26 @@ window.addEventListener("DOMContentLoaded", async () => {
 }
 
 fn resolve_session_file(markdown_path: &str, encoded_path: &str) -> Result<PathBuf, ApiError> {
-    let relative_path = percent_decode_path(encoded_path)?;
-    let relative_path = safe_relative_path(&relative_path)?;
     let base = FsPath::new(markdown_path)
         .parent()
         .unwrap_or_else(|| FsPath::new("."))
         .canonicalize()
         .map_err(ApiError::Io)?;
-    let target = canonicalize_existing(base.join(relative_path))?;
-
-    if !target.starts_with(base) {
-        return Err(ApiError::Forbidden);
-    }
-
-    Ok(target)
+    resolve_file_under_base(base, encoded_path)
 }
 
 fn resolve_asset_file(asset_dir: &str, encoded_path: &str) -> Result<PathBuf, ApiError> {
-    let relative_path = percent_decode_path(encoded_path)?;
-    let relative_path = safe_relative_path(&relative_path)?;
     let base = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("assets")
         .join(asset_dir)
         .canonicalize()
         .map_err(ApiError::Io)?;
+    resolve_file_under_base(base, encoded_path)
+}
+
+fn resolve_file_under_base(base: PathBuf, encoded_path: &str) -> Result<PathBuf, ApiError> {
+    let relative_path = percent_decode_path(encoded_path)?;
+    let relative_path = safe_relative_path(&relative_path)?;
     let target = canonicalize_existing(base.join(relative_path))?;
 
     if !target.starts_with(base) {

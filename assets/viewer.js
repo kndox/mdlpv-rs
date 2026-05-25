@@ -193,34 +193,28 @@
   }
 
   function loadScript(src) {
-    return new Promise((resolve, reject) => {
-      const existing = document.querySelector(`script[data-mdlive-mermaid="${src}"]`);
-      if (existing) {
-        if (existing.dataset.mdliveLoaded === "true") {
-          resolve();
-          return;
-        }
-        existing.addEventListener("load", resolve, { once: true });
-        existing.addEventListener("error", reject, { once: true });
-        return;
-      }
-
+    return loadAsset(`script[data-mdlive-script="${src}"]`, () => {
       const script = document.createElement("script");
       script.src = src;
       script.async = true;
-      script.dataset.mdliveMermaid = src;
-      script.onload = () => {
-        script.dataset.mdliveLoaded = "true";
-        resolve();
-      };
-      script.onerror = reject;
-      document.head.appendChild(script);
+      script.dataset.mdliveScript = src;
+      return script;
     });
   }
 
   function loadStylesheet(href) {
+    return loadAsset(`link[data-mdlive-style="${href}"]`, () => {
+      const link = document.createElement("link");
+      link.rel = "stylesheet";
+      link.href = href;
+      link.dataset.mdliveStyle = href;
+      return link;
+    });
+  }
+
+  function loadAsset(selector, createElement) {
     return new Promise((resolve, reject) => {
-      const existing = document.querySelector(`link[data-mdlive-style="${href}"]`);
+      const existing = document.querySelector(selector);
       if (existing) {
         if (existing.dataset.mdliveLoaded === "true") {
           resolve();
@@ -231,16 +225,13 @@
         return;
       }
 
-      const link = document.createElement("link");
-      link.rel = "stylesheet";
-      link.href = href;
-      link.dataset.mdliveStyle = href;
-      link.onload = () => {
-        link.dataset.mdliveLoaded = "true";
+      const element = createElement();
+      element.onload = () => {
+        element.dataset.mdliveLoaded = "true";
         resolve();
       };
-      link.onerror = reject;
-      document.head.appendChild(link);
+      element.onerror = reject;
+      document.head.appendChild(element);
     });
   }
 

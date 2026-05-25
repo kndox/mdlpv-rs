@@ -220,12 +220,12 @@ function M.open(bufnr)
   browser.open(session.view_url, config.options)
 end
 
-local function default_export_path(bufnr)
+local function default_export_path(bufnr, extension)
   local name = vim.api.nvim_buf_get_name(bufnr)
   if name == "" then
-    return vim.fn.getcwd() .. "/mdlive-export.html"
+    return vim.fn.getcwd() .. "/mdlive-export." .. extension
   end
-  return vim.fn.fnamemodify(name, ":r") .. ".html"
+  return vim.fn.fnamemodify(name, ":r") .. "." .. extension
 end
 
 local function write_export(bufnr, output_path)
@@ -250,35 +250,31 @@ local function write_export(bufnr, output_path)
   end)
 end
 
-function M.export_html(bufnr)
+local function export_with_session(bufnr, prompt, extension, write)
   bufnr = bufnr or vim.api.nvim_get_current_buf()
   vim.ui.input({
-    prompt = "Export HTML: ",
-    default = default_export_path(bufnr),
+    prompt = prompt,
+    default = default_export_path(bufnr, extension),
     completion = "file",
   }, function(output_path)
     if not output_path or output_path == "" then
       return
     end
     if sessions[bufnr] then
-      write_export(bufnr, output_path)
+      write(bufnr, output_path)
       return
     end
     M.start(bufnr, function(err)
       if err then
         return
       end
-      write_export(bufnr, output_path)
+      write(bufnr, output_path)
     end)
   end)
 end
 
-local function default_pdf_path(bufnr)
-  local name = vim.api.nvim_buf_get_name(bufnr)
-  if name == "" then
-    return vim.fn.getcwd() .. "/mdlive-export.pdf"
-  end
-  return vim.fn.fnamemodify(name, ":r") .. ".pdf"
+function M.export_html(bufnr)
+  export_with_session(bufnr, "Export HTML: ", "html", write_export)
 end
 
 local function write_pdf_export(bufnr, output_path)
@@ -301,26 +297,7 @@ local function write_pdf_export(bufnr, output_path)
 end
 
 function M.export_pdf(bufnr)
-  bufnr = bufnr or vim.api.nvim_get_current_buf()
-  vim.ui.input({
-    prompt = "Export PDF: ",
-    default = default_pdf_path(bufnr),
-    completion = "file",
-  }, function(output_path)
-    if not output_path or output_path == "" then
-      return
-    end
-    if sessions[bufnr] then
-      write_pdf_export(bufnr, output_path)
-      return
-    end
-    M.start(bufnr, function(err)
-      if err then
-        return
-      end
-      write_pdf_export(bufnr, output_path)
-    end)
-  end)
+  export_with_session(bufnr, "Export PDF: ", "pdf", write_pdf_export)
 end
 
 function M.close_session(bufnr, cb)

@@ -1,6 +1,43 @@
 use pulldown_cmark::{CowStr, Event, Options, Parser, Tag, html};
-use std::ops::Range;
+use std::{collections::HashSet, ops::Range};
 use uuid::Uuid;
+
+const ALLOWED_STYLE_PROPERTIES: [&str; 34] = [
+    "align-items",
+    "background-color",
+    "border",
+    "border-radius",
+    "color",
+    "display",
+    "flex-direction",
+    "flex-wrap",
+    "font-family",
+    "font-size",
+    "font-style",
+    "font-weight",
+    "gap",
+    "height",
+    "justify-content",
+    "letter-spacing",
+    "line-height",
+    "margin",
+    "max-height",
+    "max-width",
+    "min-height",
+    "min-width",
+    "overflow",
+    "overflow-x",
+    "overflow-y",
+    "padding",
+    "text-align",
+    "text-decoration",
+    "text-indent",
+    "text-transform",
+    "vertical-align",
+    "white-space",
+    "width",
+    "word-spacing",
+];
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RenderedMarkdown {
@@ -92,11 +129,16 @@ fn render_event(event: Event<'_>, session_id: Option<Uuid>) -> Event<'_> {
 fn sanitize_rendered_html(input: &str) -> String {
     let mut builder = ammonia::Builder::default();
     builder
-        .add_tags(&["font", "input"])
+        .add_tags(&[
+            "address", "font", "input", "main", "meter", "progress", "section", "tfoot",
+        ])
         .add_tag_attributes("font", &["color"])
         .add_tag_attributes("input", &["type", "checked", "disabled"])
-        .add_generic_attributes(&["class", "id"])
-        .add_generic_attribute_prefixes(&["data-"]);
+        .add_tag_attributes("meter", &["value", "min", "max", "low", "high", "optimum"])
+        .add_tag_attributes("progress", &["value", "max"])
+        .add_generic_attributes(&["class", "id", "style"])
+        .add_generic_attribute_prefixes(&["data-"])
+        .filter_style_properties(HashSet::from(ALLOWED_STYLE_PROPERTIES));
 
     builder.clean(input).to_string()
 }
@@ -335,6 +377,39 @@ mod tests {
         assert!(!html.contains("onclick"));
         assert!(!html.contains("onerror"));
         assert!(!html.contains("face="));
+    }
+
+    #[test]
+    fn sanitizer_filters_inline_styles() {
+        let input = r#"<section style="color: red; background-color: #fff; margin: 1rem; display: flex; gap: 8px; position: fixed; z-index: 999; background-image: url(https://example.test/tracker.png); transform: scale(2)">styled</section>"#;
+        let html = sanitize_rendered_html(input);
+
+        assert!(html.contains("color:red"));
+        assert!(html.contains("background-color:#fff"));
+        assert!(html.contains("margin:1rem"));
+        assert!(html.contains("display:flex"));
+        assert!(html.contains("gap:8px"));
+        assert!(!html.contains("position"));
+        assert!(!html.contains("z-index"));
+        assert!(!html.contains("background-image"));
+        assert!(!html.contains("example.test"));
+        assert!(!html.contains("transform"));
+    }
+
+    #[test]
+    fn sanitizer_keeps_safe_static_elements_and_attributes() {
+        let input = r#"<main><section><address>Somewhere</address><meter value="0.6" min="0" max="1" low="0.2" high="0.8" optimum="0.7" onclick="alert(1)">60%</meter><progress value="3" max="10" formaction="https://example.test">3/10</progress><table><tfoot><tr><td>Footer</td></tr></tfoot></table></section></main>"#;
+        let html = sanitize_rendered_html(input);
+
+        assert!(html.contains("<main><section><address>Somewhere</address>"));
+        assert!(html.contains(
+            r#"<meter value="0.6" min="0" max="1" low="0.2" high="0.8" optimum="0.7">60%</meter>"#
+        ));
+        assert!(html.contains(r#"<progress value="3" max="10">3/10</progress>"#));
+        assert!(html.contains("<tfoot><tr><td>Footer</td></tr></tfoot>"));
+        assert!(!html.contains("onclick"));
+        assert!(!html.contains("formaction"));
+        assert!(!html.contains("example.test"));
     }
 
     #[test]

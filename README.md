@@ -175,7 +175,7 @@ This repository bundles `mermaid@11.15.0` and `katex@0.16.25` for offline render
 
 ## Safety
 
-The server binds to `127.0.0.1` by default. Safe raw HTML in Markdown is rendered after sanitization. Dangerous tags, event handler attributes, and unsafe URLs are removed.
+The server binds to `127.0.0.1` by default. Safe raw HTML in Markdown is rendered after sanitization. This includes elements such as `<details><summary>More</summary>Text</details>` and `<font color="red">red</font>`. The deprecated `font` element supports only its `color` attribute. Dangerous tags, event handler attributes, unsafe URLs, and unsupported attributes are removed.
 
 ## Development
 

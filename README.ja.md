@@ -175,7 +175,7 @@ relative Markdown image path は Markdown file の parent directory から serve
 
 ## Safety
 
-server は default で `127.0.0.1` に bind します。Markdown 内の安全な raw HTML は sanitize 後に render されます。危険な tag、event handler attribute、安全でない URL は除去されます。
+server は default で `127.0.0.1` に bind します。Markdown 内の安全な raw HTML は sanitize 後に render されます。たとえば `<details><summary>詳細</summary>本文</details>` や `<font color="red">赤字</font>` を使用できます。非推奨の `font` element では `color` attribute だけをサポートします。危険な tag、event handler attribute、安全でない URL、未対応の attribute は除去されます。
 
 ## Development
 

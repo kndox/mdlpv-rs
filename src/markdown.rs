@@ -92,7 +92,8 @@ fn render_event(event: Event<'_>, session_id: Option<Uuid>) -> Event<'_> {
 fn sanitize_rendered_html(input: &str) -> String {
     let mut builder = ammonia::Builder::default();
     builder
-        .add_tags(&["input"])
+        .add_tags(&["font", "input"])
+        .add_tag_attributes("font", &["color"])
         .add_tag_attributes("input", &["type", "checked", "disabled"])
         .add_generic_attributes(&["class", "id"])
         .add_generic_attribute_prefixes(&["data-"]);
@@ -257,7 +258,7 @@ mod tests {
     #[test]
     fn renders_safe_raw_html() {
         let rendered = render_markdown(
-            "<script>alert(1)</script>\n\n<div><b>block</b></div>\n\n<details><summary>More</summary>Text</details>\n\nHello <b>world</b>",
+            "<script>alert(1)</script>\n\n<div><b>block</b></div>\n\n<details><summary>More</summary>Text</details>\n\nHello <b>world</b> and <font color=\"red\">red</font>",
             None,
         );
 
@@ -268,6 +269,7 @@ mod tests {
                 .contains("<details><summary>More</summary>Text</details>")
         );
         assert!(rendered.html.contains("Hello <b>world</b>"));
+        assert!(rendered.html.contains(r#"<font color="red">red</font>"#));
         assert!(!rendered.html.contains("<script>"));
         assert!(!rendered.html.contains("alert(1)"));
     }
@@ -325,12 +327,14 @@ mod tests {
 
     #[test]
     fn sanitizer_removes_dangerous_urls_and_event_handlers() {
-        let input = r#"<a href="javascript:alert(1)" onclick="alert(1)">x</a><img src="javascript:alert(1)" onerror="alert(1)">"#;
+        let input = r#"<a href="javascript:alert(1)" onclick="alert(1)">x</a><img src="javascript:alert(1)" onerror="alert(1)"><font color="red" face="serif" onclick="alert(1)">red</font>"#;
         let html = sanitize_rendered_html(input);
 
+        assert!(html.contains(r#"<font color="red">red</font>"#));
         assert!(!html.contains("javascript:"));
         assert!(!html.contains("onclick"));
         assert!(!html.contains("onerror"));
+        assert!(!html.contains("face="));
     }
 
     #[test]

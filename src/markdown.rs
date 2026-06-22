@@ -1,6 +1,44 @@
+use cssparser::{Parser as CssParser, ParserInput as CssParserInput, Token};
 use pulldown_cmark::{CowStr, Event, Options, Parser, Tag, html};
-use std::ops::Range;
+use std::{borrow::Cow, collections::HashSet, ops::Range};
 use uuid::Uuid;
+
+const ALLOWED_STYLE_PROPERTIES: [&str; 34] = [
+    "align-items",
+    "background-color",
+    "border",
+    "border-radius",
+    "color",
+    "display",
+    "flex-direction",
+    "flex-wrap",
+    "font-family",
+    "font-size",
+    "font-style",
+    "font-weight",
+    "gap",
+    "height",
+    "justify-content",
+    "letter-spacing",
+    "line-height",
+    "margin",
+    "max-height",
+    "max-width",
+    "min-height",
+    "min-width",
+    "overflow",
+    "overflow-x",
+    "overflow-y",
+    "padding",
+    "text-align",
+    "text-decoration",
+    "text-indent",
+    "text-transform",
+    "vertical-align",
+    "white-space",
+    "width",
+    "word-spacing",
+];
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RenderedMarkdown {
@@ -92,12 +130,53 @@ fn render_event(event: Event<'_>, session_id: Option<Uuid>) -> Event<'_> {
 fn sanitize_rendered_html(input: &str) -> String {
     let mut builder = ammonia::Builder::default();
     builder
-        .add_tags(&["input"])
+        .add_tags(&[
+            "address", "font", "input", "main", "meter", "progress", "section", "tfoot",
+        ])
+        .add_tag_attributes("font", &["color"])
         .add_tag_attributes("input", &["type", "checked", "disabled"])
-        .add_generic_attributes(&["class", "id"])
-        .add_generic_attribute_prefixes(&["data-"]);
+        .add_tag_attributes("meter", &["value", "min", "max", "low", "high", "optimum"])
+        .add_tag_attributes("progress", &["value", "max"])
+        .add_generic_attributes(&["class", "id", "style"])
+        .add_generic_attribute_prefixes(&["data-"])
+        .attribute_filter(|_, attribute, value| {
+            (attribute == "style")
+                .then(|| Cow::Owned(normalize_style_property_names(value)))
+                .or(Some(Cow::Borrowed(value)))
+        })
+        .filter_style_properties(HashSet::from(ALLOWED_STYLE_PROPERTIES));
 
     builder.clean(input).to_string()
+}
+
+fn normalize_style_property_names(style: &str) -> String {
+    let mut input = CssParserInput::new(style);
+    let mut parser = CssParser::new(&mut input);
+    let mut property_ranges = Vec::new();
+    let mut at_declaration_start = true;
+
+    while !parser.is_exhausted() {
+        let start = parser.position();
+        let Ok(token) = parser.next_including_whitespace_and_comments().cloned() else {
+            break;
+        };
+
+        match token {
+            Token::WhiteSpace(_) | Token::Comment(_) if at_declaration_start => {}
+            Token::Ident(_) if at_declaration_start => {
+                property_ranges.push(start.byte_index()..parser.position().byte_index());
+                at_declaration_start = false;
+            }
+            Token::Semicolon => at_declaration_start = true,
+            _ => at_declaration_start = false,
+        }
+    }
+
+    let mut normalized = style.to_owned();
+    for range in property_ranges.into_iter().rev() {
+        normalized.replace_range(range.clone(), &style[range].to_ascii_lowercase());
+    }
+    normalized
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -257,7 +336,7 @@ mod tests {
     #[test]
     fn renders_safe_raw_html() {
         let rendered = render_markdown(
-            "<script>alert(1)</script>\n\n<div><b>block</b></div>\n\n<details><summary>More</summary>Text</details>\n\nHello <b>world</b>",
+            "<script>alert(1)</script>\n\n<div><b>block</b></div>\n\n<details><summary>More</summary>Text</details>\n\nHello <b>world</b> and <font color=\"red\">red</font>",
             None,
         );
 
@@ -268,6 +347,7 @@ mod tests {
                 .contains("<details><summary>More</summary>Text</details>")
         );
         assert!(rendered.html.contains("Hello <b>world</b>"));
+        assert!(rendered.html.contains(r#"<font color="red">red</font>"#));
         assert!(!rendered.html.contains("<script>"));
         assert!(!rendered.html.contains("alert(1)"));
     }
@@ -325,12 +405,77 @@ mod tests {
 
     #[test]
     fn sanitizer_removes_dangerous_urls_and_event_handlers() {
-        let input = r#"<a href="javascript:alert(1)" onclick="alert(1)">x</a><img src="javascript:alert(1)" onerror="alert(1)">"#;
+        let input = r#"<a href="javascript:alert(1)" onclick="alert(1)">x</a><img src="javascript:alert(1)" onerror="alert(1)"><font color="red" face="serif" onclick="alert(1)">red</font>"#;
         let html = sanitize_rendered_html(input);
 
+        assert!(html.contains(r#"<font color="red">red</font>"#));
         assert!(!html.contains("javascript:"));
         assert!(!html.contains("onclick"));
         assert!(!html.contains("onerror"));
+        assert!(!html.contains("face="));
+    }
+
+    #[test]
+    fn sanitizer_filters_inline_styles() {
+        let input = r#"<section style="color: red; background-color: #fff; margin: 1rem; display: flex; gap: 8px; position: fixed; z-index: 999; background-image: url(https://example.test/tracker.png); transform: scale(2)">styled</section>"#;
+        let html = sanitize_rendered_html(input);
+
+        assert!(html.contains("color:red"));
+        assert!(html.contains("background-color:#fff"));
+        assert!(html.contains("margin:1rem"));
+        assert!(html.contains("display:flex"));
+        assert!(html.contains("gap:8px"));
+        assert!(!html.contains("position"));
+        assert!(!html.contains("z-index"));
+        assert!(!html.contains("background-image"));
+        assert!(!html.contains("example.test"));
+        assert!(!html.contains("transform"));
+    }
+
+    #[test]
+    fn sanitizer_matches_inline_style_properties_case_insensitively() {
+        let input =
+            r#"<section style="COLOR: red; Font-Weight: bold; POSITION: fixed">styled</section>"#;
+        let html = sanitize_rendered_html(input);
+
+        assert!(html.contains("color:red"));
+        assert!(html.contains("font-weight:bold"));
+        assert!(!html.contains("position"));
+    }
+
+    #[test]
+    fn style_normalization_preserves_delimiters_inside_values() {
+        let style = r#"FONT-FAMILY:"ACME;Variant:UPPER"; COLOR:rgb(1; 2; 3)"#;
+
+        assert_eq!(
+            normalize_style_property_names(style),
+            r#"font-family:"ACME;Variant:UPPER"; color:rgb(1; 2; 3)"#
+        );
+    }
+
+    #[test]
+    fn sanitizer_preserves_delimiters_inside_style_values() {
+        let html = sanitize_rendered_html(
+            r#"<section style='FONT-FAMILY:"ACME;Variant:UPPER"'>styled</section>"#,
+        );
+
+        assert!(html.contains(r#"font-family:&quot;ACME;Variant:UPPER&quot;"#));
+    }
+
+    #[test]
+    fn sanitizer_keeps_safe_static_elements_and_attributes() {
+        let input = r#"<main><section><address>Somewhere</address><meter value="0.6" min="0" max="1" low="0.2" high="0.8" optimum="0.7" onclick="alert(1)">60%</meter><progress value="3" max="10" formaction="https://example.test">3/10</progress><table><tfoot><tr><td>Footer</td></tr></tfoot></table></section></main>"#;
+        let html = sanitize_rendered_html(input);
+
+        assert!(html.contains("<main><section><address>Somewhere</address>"));
+        assert!(html.contains(
+            r#"<meter value="0.6" min="0" max="1" low="0.2" high="0.8" optimum="0.7">60%</meter>"#
+        ));
+        assert!(html.contains(r#"<progress value="3" max="10">3/10</progress>"#));
+        assert!(html.contains("<tfoot><tr><td>Footer</td></tr></tfoot>"));
+        assert!(!html.contains("onclick"));
+        assert!(!html.contains("formaction"));
+        assert!(!html.contains("example.test"));
     }
 
     #[test]

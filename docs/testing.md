@@ -11,7 +11,7 @@ cargo clippy -- -D warnings
 NVIM_LOG_FILE=/tmp/mdlive-nvim.log nvim --headless -u NONE -n -l tests/lua/mdlive_spec.lua
 ```
 
-The Rust tests cover Markdown rendering, raw HTML escaping, Mermaid fence detection, session revision updates, and the HTTP session API.
+The Rust tests cover Markdown rendering, safe raw HTML rendering and sanitization, Mermaid fence detection, session revision updates, and the HTTP session API.
 
 ## Neovim Plugin
 

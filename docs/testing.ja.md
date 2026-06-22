@@ -11,7 +11,7 @@ cargo clippy -- -D warnings
 NVIM_LOG_FILE=/tmp/mdlive-nvim.log nvim --headless -u NONE -n -l tests/lua/mdlive_spec.lua
 ```
 
-Rust の test は Markdown render、raw HTML escape、Mermaid fence 検出、session revision 更新、HTTP session API を対象にする。
+Rust の test は Markdown render、安全な raw HTML の render と sanitize、Mermaid fence 検出、session revision 更新、HTTP session API を対象にする。
 
 ## Neovim Plugin
 

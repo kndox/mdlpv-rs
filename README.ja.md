@@ -175,7 +175,7 @@ relative Markdown image path は Markdown file の parent directory から serve
 
 ## Safety
 
-server は default で `127.0.0.1` に bind します。Markdown 内の raw HTML は v0.1 では render 前に escape されます。
+server は default で `127.0.0.1` に bind します。Markdown 内の安全な raw HTML は sanitize 後に render されます。危険な tag、event handler attribute、安全でない URL は除去されます。
 
 ## Development
 

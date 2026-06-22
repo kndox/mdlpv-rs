@@ -54,9 +54,6 @@ fn render_events<'a>(
 
 fn render_event(event: Event<'_>, session_id: Option<Uuid>) -> Event<'_> {
     match event {
-        Event::Html(html) | Event::InlineHtml(html) => {
-            Event::Text(CowStr::Boxed(html.into_string().into_boxed_str()))
-        }
         Event::InlineMath(math) => Event::Html(CowStr::Boxed(
             format!(
                 r#"<span class="math math-inline">{}</span>"#,
@@ -258,17 +255,21 @@ mod tests {
     }
 
     #[test]
-    fn escapes_raw_html() {
-        let rendered = render_markdown("<script>alert(1)</script>\n\nHello <b>world</b>", None);
+    fn renders_safe_raw_html() {
+        let rendered = render_markdown(
+            "<script>alert(1)</script>\n\n<div><b>block</b></div>\n\n<details><summary>More</summary>Text</details>\n\nHello <b>world</b>",
+            None,
+        );
 
+        assert!(rendered.html.contains("<div><b>block</b></div>"));
         assert!(
             rendered
                 .html
-                .contains("&lt;script&gt;alert(1)&lt;/script&gt;")
+                .contains("<details><summary>More</summary>Text</details>")
         );
-        assert!(rendered.html.contains("Hello &lt;b&gt;world&lt;/b&gt;"));
+        assert!(rendered.html.contains("Hello <b>world</b>"));
         assert!(!rendered.html.contains("<script>"));
-        assert!(!rendered.html.contains("<b>world</b>"));
+        assert!(!rendered.html.contains("alert(1)"));
     }
 
     #[test]

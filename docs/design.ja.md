@@ -83,7 +83,7 @@ inline math と display math は bundled KaTeX assets を使って browser 側�
 
 default bind address は `127.0.0.1` であり、local preview 用途を前提にする。
 
-Markdown 内の raw HTML は render 前に escape する。relative Markdown image は Markdown file の parent directory から serve し、その directory 外の path は拒否する。
+Markdown 内の raw HTML は allowlist ベースで sanitize して render する。危険な tag、event handler attribute、安全でない URL は除去する。relative Markdown image は Markdown file の parent directory から serve し、その directory 外の path は拒否する。raw HTML 内の relative URL は image API 用に rewrite しない。
 
 Mermaid は browser 側で `securityLevel: "strict"` を指定する。
 

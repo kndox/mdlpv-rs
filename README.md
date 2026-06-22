@@ -175,7 +175,7 @@ This repository bundles `mermaid@11.15.0` and `katex@0.16.25` for offline render
 
 ## Safety
 
-The server binds to `127.0.0.1` by default. Raw HTML in Markdown is escaped before rendering in v0.1.
+The server binds to `127.0.0.1` by default. Safe raw HTML in Markdown is rendered after sanitization. Dangerous tags, event handler attributes, and unsafe URLs are removed.
 
 ## Development
 

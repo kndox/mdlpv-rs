@@ -83,7 +83,7 @@ Inline and display math are rendered in the browser with bundled KaTeX assets.
 
 The default bind address is `127.0.0.1`, and the tool is intended for local preview use.
 
-Raw HTML in Markdown is escaped before rendering. Relative Markdown images are served from the Markdown file's parent directory, and paths outside that directory are rejected.
+Raw HTML in Markdown is rendered through an allowlist-based sanitizer. Dangerous tags, event handler attributes, and unsafe URLs are removed. Relative Markdown images are served from the Markdown file's parent directory, and paths outside that directory are rejected. Relative URLs inside raw HTML are not rewritten to the image API.
 
 Mermaid runs in the browser with `securityLevel: "strict"`.
 

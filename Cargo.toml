@@ -1,6 +1,6 @@
 [package]
 name = "mdlpv-rs"
-version = "0.1.1"
+version = "0.1.2"
 edition = "2024"
 description = "Neovim Markdown live preview powered by a small Rust localhost server"
 license = "MIT"

@@ -724,6 +724,7 @@ dependencies = [
  "anyhow",
  "axum",
  "clap",
+ "cssparser",
  "futures-util",
  "pulldown-cmark",
  "serde",

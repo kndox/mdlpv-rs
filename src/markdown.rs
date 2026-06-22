@@ -1,3 +1,4 @@
+use cssparser::{Parser as CssParser, ParserInput as CssParserInput, Token};
 use pulldown_cmark::{CowStr, Event, Options, Parser, Tag, html};
 use std::{borrow::Cow, collections::HashSet, ops::Range};
 use uuid::Uuid;
@@ -149,16 +150,33 @@ fn sanitize_rendered_html(input: &str) -> String {
 }
 
 fn normalize_style_property_names(style: &str) -> String {
-    style
-        .split(';')
-        .map(|declaration| {
-            declaration.split_once(':').map_or_else(
-                || declaration.to_owned(),
-                |(property, value)| format!("{}:{value}", property.to_ascii_lowercase()),
-            )
-        })
-        .collect::<Vec<_>>()
-        .join(";")
+    let mut input = CssParserInput::new(style);
+    let mut parser = CssParser::new(&mut input);
+    let mut property_ranges = Vec::new();
+    let mut at_declaration_start = true;
+
+    while !parser.is_exhausted() {
+        let start = parser.position();
+        let Ok(token) = parser.next_including_whitespace_and_comments().cloned() else {
+            break;
+        };
+
+        match token {
+            Token::WhiteSpace(_) | Token::Comment(_) if at_declaration_start => {}
+            Token::Ident(_) if at_declaration_start => {
+                property_ranges.push(start.byte_index()..parser.position().byte_index());
+                at_declaration_start = false;
+            }
+            Token::Semicolon => at_declaration_start = true,
+            _ => at_declaration_start = false,
+        }
+    }
+
+    let mut normalized = style.to_owned();
+    for range in property_ranges.into_iter().rev() {
+        normalized.replace_range(range.clone(), &style[range].to_ascii_lowercase());
+    }
+    normalized
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -423,6 +441,25 @@ mod tests {
         assert!(html.contains("color:red"));
         assert!(html.contains("font-weight:bold"));
         assert!(!html.contains("position"));
+    }
+
+    #[test]
+    fn style_normalization_preserves_delimiters_inside_values() {
+        let style = r#"FONT-FAMILY:"ACME;Variant:UPPER"; COLOR:rgb(1; 2; 3)"#;
+
+        assert_eq!(
+            normalize_style_property_names(style),
+            r#"font-family:"ACME;Variant:UPPER"; color:rgb(1; 2; 3)"#
+        );
+    }
+
+    #[test]
+    fn sanitizer_preserves_delimiters_inside_style_values() {
+        let html = sanitize_rendered_html(
+            r#"<section style='FONT-FAMILY:"ACME;Variant:UPPER"'>styled</section>"#,
+        );
+
+        assert!(html.contains(r#"font-family:&quot;ACME;Variant:UPPER&quot;"#));
     }
 
     #[test]

@@ -1,5 +1,5 @@
 use pulldown_cmark::{CowStr, Event, Options, Parser, Tag, html};
-use std::{collections::HashSet, ops::Range};
+use std::{borrow::Cow, collections::HashSet, ops::Range};
 use uuid::Uuid;
 
 const ALLOWED_STYLE_PROPERTIES: [&str; 34] = [
@@ -138,9 +138,27 @@ fn sanitize_rendered_html(input: &str) -> String {
         .add_tag_attributes("progress", &["value", "max"])
         .add_generic_attributes(&["class", "id", "style"])
         .add_generic_attribute_prefixes(&["data-"])
+        .attribute_filter(|_, attribute, value| {
+            (attribute == "style")
+                .then(|| Cow::Owned(normalize_style_property_names(value)))
+                .or(Some(Cow::Borrowed(value)))
+        })
         .filter_style_properties(HashSet::from(ALLOWED_STYLE_PROPERTIES));
 
     builder.clean(input).to_string()
+}
+
+fn normalize_style_property_names(style: &str) -> String {
+    style
+        .split(';')
+        .map(|declaration| {
+            declaration.split_once(':').map_or_else(
+                || declaration.to_owned(),
+                |(property, value)| format!("{}:{value}", property.to_ascii_lowercase()),
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(";")
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -394,6 +412,17 @@ mod tests {
         assert!(!html.contains("background-image"));
         assert!(!html.contains("example.test"));
         assert!(!html.contains("transform"));
+    }
+
+    #[test]
+    fn sanitizer_matches_inline_style_properties_case_insensitively() {
+        let input =
+            r#"<section style="COLOR: red; Font-Weight: bold; POSITION: fixed">styled</section>"#;
+        let html = sanitize_rendered_html(input);
+
+        assert!(html.contains("color:red"));
+        assert!(html.contains("font-weight:bold"));
+        assert!(!html.contains("position"));
     }
 
     #[test]

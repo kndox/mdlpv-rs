@@ -1,7 +1,7 @@
 use crate::markdown::{RenderedMarkdown, render_markdown};
 use serde::{Deserialize, Serialize};
 use std::{collections::HashMap, sync::Arc};
-use tokio::sync::{RwLock, broadcast};
+use tokio::sync::{Mutex, RwLock, broadcast};
 use uuid::Uuid;
 
 pub type SharedSessions = Arc<RwLock<HashMap<Uuid, Session>>>;
@@ -42,6 +42,7 @@ pub enum SessionEvent {
 
 #[derive(Debug, Clone)]
 pub struct Session {
+    pub update_lock: Arc<Mutex<()>>,
     pub id: Uuid,
     pub path: String,
     pub title: String,
@@ -52,11 +53,12 @@ pub struct Session {
 }
 
 impl Session {
-    pub fn new(input: SessionInput) -> Self {
+    pub fn new(input: SessionInput, mermaid_enabled: bool) -> Self {
         let (updates, _) = broadcast::channel(64);
         let id = Uuid::new_v4();
-        let rendered = render_markdown(&input.content, Some(id));
+        let rendered = render_markdown(&input.content, Some(id), mermaid_enabled);
         Self {
+            update_lock: Arc::new(Mutex::new(())),
             id,
             path: input.path,
             title: input.title,
@@ -67,10 +69,10 @@ impl Session {
         }
     }
 
-    pub fn update(&mut self, input: SessionInput) -> UpdateEvent {
+    pub fn update(&mut self, input: SessionInput, rendered: RenderedMarkdown) -> UpdateEvent {
         self.path = input.path;
         self.title = input.title;
-        self.rendered = render_markdown(&input.content, Some(self.id));
+        self.rendered = rendered;
         self.content = input.content;
         self.revision += 1;
 
@@ -104,18 +106,25 @@ mod tests {
 
     #[test]
     fn update_increments_revision() {
-        let mut session = Session::new(SessionInput {
-            path: "/tmp/a.md".to_string(),
-            title: "a.md".to_string(),
-            content: "# A".to_string(),
-        });
+        let mut session = Session::new(
+            SessionInput {
+                path: "/tmp/a.md".to_string(),
+                title: "a.md".to_string(),
+                content: "# A".to_string(),
+            },
+            true,
+        );
         let mut receiver = session.updates.subscribe();
 
-        let event = session.update(SessionInput {
-            path: "/tmp/a.md".to_string(),
-            title: "a.md".to_string(),
-            content: "# B".to_string(),
-        });
+        let rendered = render_markdown("# B", Some(session.id), true);
+        let event = session.update(
+            SessionInput {
+                path: "/tmp/a.md".to_string(),
+                title: "a.md".to_string(),
+                content: "# B".to_string(),
+            },
+            rendered,
+        );
 
         assert_eq!(event.revision, 2);
         assert_eq!(session.revision, 2);
@@ -128,11 +137,14 @@ mod tests {
 
     #[test]
     fn scroll_sends_scroll_event() {
-        let session = Session::new(SessionInput {
-            path: "/tmp/a.md".to_string(),
-            title: "a.md".to_string(),
-            content: "# A".to_string(),
-        });
+        let session = Session::new(
+            SessionInput {
+                path: "/tmp/a.md".to_string(),
+                title: "a.md".to_string(),
+                content: "# A".to_string(),
+            },
+            true,
+        );
         let mut receiver = session.updates.subscribe();
 
         let event = session.scroll(ScrollInput { line: 12 });
@@ -146,11 +158,14 @@ mod tests {
 
     #[test]
     fn close_sends_close_event() {
-        let session = Session::new(SessionInput {
-            path: "/tmp/a.md".to_string(),
-            title: "a.md".to_string(),
-            content: "# A".to_string(),
-        });
+        let session = Session::new(
+            SessionInput {
+                path: "/tmp/a.md".to_string(),
+                title: "a.md".to_string(),
+                content: "# A".to_string(),
+            },
+            true,
+        );
         let mut receiver = session.updates.subscribe();
 
         let event = session.close();

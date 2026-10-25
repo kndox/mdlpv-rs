@@ -44,3 +44,9 @@ Before making the repository public:
 ## Remaining Work
 
 - Verify the first public release on GitHub before announcing the prebuilt Lazy.nvim install path.
+
+## 0.2.0
+
+Mermaid rendering now uses merman 0.9.2. Update the plugin and server binary together. Lua `mermaid.mode` / `mermaid.cdn_url` are removed; `mermaid.enabled` remains. CLI modes are `merman` / `none`. Source builds require Rust 1.95 or later.
+
+`docs/third-party/merman/` contains license texts and notices for linked components, including ELK and fonts. Keep this directory in release archives; the existing packaging workflow includes it by copying all of `docs/`.

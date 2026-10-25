@@ -3,7 +3,6 @@
   const status = document.getElementById("status");
   const config = window.MDLIVE_CONFIG;
   let currentRevision = -1;
-  let mermaidLoaded = false;
   let katexLoaded = false;
   let lastScrollLine = null;
   let pendingScrollLine = null;
@@ -26,7 +25,6 @@
     document.title = data.title || "Markdown Live Preview";
     content.innerHTML = data.html;
 
-    await renderMermaidIfNeeded(data.has_mermaid);
     await renderMathIfNeeded(data.has_math);
     if (lastScrollLine !== null) {
       queueScrollToSourceLine(lastScrollLine, "smooth");
@@ -66,21 +64,6 @@
     }, 100);
   }
 
-  async function renderMermaidIfNeeded(hasMermaid) {
-    if (!hasMermaid) {
-      return;
-    }
-
-    normalizeMermaidBlocks(content);
-    const mermaid = await ensureMermaid();
-    if (!mermaid) {
-      status.textContent = "Mermaid disabled";
-      return;
-    }
-
-    await mermaid.run({ querySelector: ".mermaid" });
-  }
-
   async function renderMathIfNeeded(hasMath) {
     if (!hasMath) {
       return;
@@ -93,17 +76,6 @@
         displayMode: node.classList.contains("math-display"),
         throwOnError: false,
       });
-    }
-  }
-
-  function normalizeMermaidBlocks(root) {
-    const blocks = root.querySelectorAll("pre > code.language-mermaid");
-    for (const code of blocks) {
-      const pre = code.parentElement;
-      const div = document.createElement("div");
-      div.className = "mermaid";
-      div.textContent = code.textContent;
-      pre.replaceWith(div);
     }
   }
 
@@ -138,41 +110,6 @@
     if (target) {
       target.scrollIntoView({ block: "start", behavior });
     }
-  }
-
-  async function ensureMermaid() {
-    if (mermaidLoaded || window.mermaid) {
-      mermaidLoaded = true;
-      return window.mermaid;
-    }
-    if (config.mermaidMode === "none") {
-      return null;
-    }
-
-    const src = config.mermaidMode === "cdn"
-      ? config.mermaidCdnUrl
-      : "/assets/mermaid/mermaid.min.js";
-
-    try {
-      await loadScript(src);
-    } catch (err) {
-      if (config.mermaidMode === "local-with-cdn-fallback") {
-        await loadScript(config.mermaidCdnUrl);
-      } else {
-        throw new Error("Mermaid asset not found");
-      }
-    }
-
-    if (!window.mermaid) {
-      throw new Error("Mermaid failed to load");
-    }
-
-    window.mermaid.initialize({
-      startOnLoad: false,
-      securityLevel: "strict",
-    });
-    mermaidLoaded = true;
-    return window.mermaid;
   }
 
   async function ensureKatex() {

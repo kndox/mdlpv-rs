@@ -11,7 +11,7 @@ cargo clippy -- -D warnings
 NVIM_LOG_FILE=/tmp/mdlive-nvim.log nvim --headless -u NONE -n -l tests/lua/mdlive_spec.lua
 ```
 
-The Rust tests cover Markdown rendering, safe raw HTML rendering and sanitization, Mermaid fence detection, session revision updates, and the HTTP session API.
+The Rust tests cover Markdown rendering, safe raw HTML rendering and sanitization, Mermaid SVG rendering, error fallback and fence detection, session revision updates, and the HTTP session API.
 
 ## Neovim Plugin
 
@@ -23,7 +23,7 @@ Manual smoke test:
 4. Open a Markdown buffer and run `:MdLiveStart`.
 5. Confirm the browser opens and renders the first preview.
 6. Edit the buffer and confirm the preview updates.
-7. Add a `mermaid` fenced block and confirm Mermaid loads only for that document.
+7. Add a `mermaid` fenced block and confirm its diagram appears without loading Mermaid JavaScript.
 8. Run `:MdLiveExportHtml` and confirm an HTML file is written.
 9. Run `:MdLiveExportPdf` with a Chrome/Chromium-compatible headless browser installed and confirm a PDF file is written.
 10. Run `:MdLiveStop` and confirm the server process exits.

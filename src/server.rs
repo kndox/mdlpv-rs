@@ -40,13 +40,13 @@ pub struct AppConfig {
     pub host: String,
     pub port: u16,
     pub mermaid_mode: MermaidMode,
-    pub mermaid_cdn_url: String,
 }
 
 #[derive(Debug, Clone)]
 pub struct AppState {
     pub config: AppConfig,
     pub sessions: SharedSessions,
+    render_slots: std::sync::Arc<tokio::sync::Semaphore>,
     assets_root: PathBuf,
 }
 
@@ -55,6 +55,7 @@ impl AppState {
         Self {
             config,
             sessions: new_store(),
+            render_slots: std::sync::Arc::new(tokio::sync::Semaphore::new(2)),
             assets_root: select_assets_root(
                 std::env::current_exe().ok().as_deref(),
                 FsPath::new(env!("CARGO_MANIFEST_DIR")),
@@ -79,7 +80,6 @@ pub fn app(state: AppState) -> Router {
         .route("/view/{session_id}", get(view_session))
         .route("/assets/viewer.js", get(viewer_js))
         .route("/assets/style.css", get(style_css))
-        .route("/assets/mermaid/mermaid.min.js", get(mermaid_asset))
         .route("/assets/katex/{*path}", get(katex_asset))
         .layer(DefaultBodyLimit::max(MAX_JSON_BODY_BYTES))
         .layer(middleware::map_response(add_security_headers))
@@ -108,11 +108,32 @@ async fn health() -> Json<HealthResponse> {
     Json(HealthResponse { ok: true })
 }
 
+// Keep the permit in the worker: cancelling an HTTP request must not release
+// capacity while its synchronous rendering job is still running.
+async fn run_render_job<T: Send + 'static>(
+    state: &AppState,
+    job: impl FnOnce() -> T + Send + 'static,
+) -> Result<T, ApiError> {
+    let permit = state
+        .render_slots
+        .clone()
+        .acquire_owned()
+        .await
+        .expect("render semaphore stays open");
+    tokio::task::spawn_blocking(move || {
+        let _permit = permit;
+        job()
+    })
+    .await
+    .map_err(ApiError::RenderTask)
+}
+
 async fn create_session(
     State(state): State<AppState>,
     Json(input): Json<SessionInput>,
-) -> Json<CreateSessionResponse> {
-    let session = Session::new(input);
+) -> Result<Json<CreateSessionResponse>, ApiError> {
+    let enabled = matches!(state.config.mermaid_mode, MermaidMode::Merman);
+    let session = run_render_job(&state, move || Session::new(input, enabled)).await?;
     let id = session.id;
     let view_url = format!(
         "http://{}:{}/view/{}",
@@ -121,10 +142,10 @@ async fn create_session(
 
     state.sessions.write().await.insert(id, session);
 
-    Json(CreateSessionResponse {
+    Ok(Json(CreateSessionResponse {
         session_id: id,
         view_url,
-    })
+    }))
 }
 
 async fn update_session(
@@ -132,11 +153,26 @@ async fn update_session(
     Path(session_id): Path<Uuid>,
     Json(input): Json<SessionInput>,
 ) -> Result<Json<UpdateSessionResponse>, ApiError> {
+    let update_lock = {
+        let sessions = state.sessions.read().await;
+        sessions
+            .get(&session_id)
+            .ok_or(ApiError::SessionNotFound)?
+            .update_lock
+            .clone()
+    };
+    let _guard = update_lock.lock().await;
+    let enabled = matches!(state.config.mermaid_mode, MermaidMode::Merman);
+    let (input, rendered) = run_render_job(&state, move || {
+        let rendered = crate::markdown::render_markdown(&input.content, Some(session_id), enabled);
+        (input, rendered)
+    })
+    .await?;
     let mut sessions = state.sessions.write().await;
     let session = sessions
         .get_mut(&session_id)
         .ok_or(ApiError::SessionNotFound)?;
-    let event = session.update(input);
+    let event = session.update(input, rendered);
 
     Ok(Json(UpdateSessionResponse {
         ok: true,
@@ -263,7 +299,7 @@ async fn view_session(
     }
     drop(sessions);
 
-    Ok(Html(viewer_html(&state.config, session_id)?))
+    Ok(Html(viewer_html(session_id)?))
 }
 
 async fn viewer_js() -> impl IntoResponse {
@@ -278,23 +314,6 @@ async fn style_css() -> impl IntoResponse {
         [(header::CONTENT_TYPE, "text/css; charset=utf-8")],
         include_str!("../assets/style.css"),
     )
-}
-
-async fn mermaid_asset(State(state): State<AppState>) -> Response {
-    let path = state.assets_root.join("mermaid").join("mermaid.min.js");
-
-    match tokio::fs::read(path).await {
-        Ok(bytes) => (
-            [(header::CONTENT_TYPE, "text/javascript; charset=utf-8")],
-            bytes,
-        )
-            .into_response(),
-        Err(_) => (
-            StatusCode::NOT_FOUND,
-            "Mermaid asset not found: assets/mermaid/mermaid.min.js",
-        )
-            .into_response(),
-    }
 }
 
 async fn katex_asset(
@@ -314,13 +333,9 @@ async fn katex_asset(
     }
 }
 
-fn viewer_html(config: &AppConfig, session_id: Uuid) -> Result<String, ApiError> {
-    let config_json = serde_json::to_string(&ViewerConfig {
-        session_id,
-        mermaid_mode: config.mermaid_mode,
-        mermaid_cdn_url: config.mermaid_cdn_url.clone(),
-    })
-    .map_err(ApiError::Serialize)?;
+fn viewer_html(session_id: Uuid) -> Result<String, ApiError> {
+    let config_json =
+        serde_json::to_string(&ViewerConfig { session_id }).map_err(ApiError::Serialize)?;
 
     Ok(include_str!("../assets/viewer.html").replace("__MDLIVE_CONFIG__", &config_json))
 }
@@ -342,11 +357,6 @@ fn export_html(config: &AppConfig, session: &Session) -> String {
         head.push_str(r#"<script defer src="/assets/katex/katex.min.js"></script>"#);
         head.push('\n');
     }
-    if session.rendered.has_mermaid {
-        head.push_str(r#"<script defer src="/assets/mermaid/mermaid.min.js"></script>"#);
-        head.push('\n');
-    }
-
     let mut scripts = String::new();
     if session.rendered.has_math {
         scripts.push_str(
@@ -364,25 +374,6 @@ window.addEventListener("DOMContentLoaded", () => {
 "#,
         );
     }
-    if session.rendered.has_mermaid {
-        scripts.push_str(
-            r#"<script>
-window.addEventListener("DOMContentLoaded", async () => {
-  if (!window.mermaid) return;
-  mermaid.initialize({ startOnLoad: false, securityLevel: "strict" });
-  document.querySelectorAll("pre > code.language-mermaid").forEach((code) => {
-    const div = document.createElement("div");
-    div.className = "mermaid";
-    div.textContent = code.textContent;
-    code.parentElement.replaceWith(div);
-  });
-  await mermaid.run({ querySelector: ".mermaid" });
-});
-</script>
-"#,
-        );
-    }
-
     format!(
         r#"<!doctype html>
 <html lang="en">
@@ -574,12 +565,12 @@ struct RenderedSessionResponse {
 #[serde(rename_all = "camelCase")]
 struct ViewerConfig {
     session_id: Uuid,
-    mermaid_mode: MermaidMode,
-    mermaid_cdn_url: String,
 }
 
 #[derive(Debug, thiserror::Error)]
 enum ApiError {
+    #[error("rendering task failed: {0}")]
+    RenderTask(tokio::task::JoinError),
     #[error("session not found")]
     SessionNotFound,
     #[error("file not found")]
@@ -602,7 +593,7 @@ impl IntoResponse for ApiError {
             ApiError::Forbidden => StatusCode::FORBIDDEN,
             ApiError::BadPath => StatusCode::BAD_REQUEST,
             ApiError::Io(_) => StatusCode::INTERNAL_SERVER_ERROR,
-            ApiError::Serialize(_) => StatusCode::INTERNAL_SERVER_ERROR,
+            ApiError::Serialize(_) | ApiError::RenderTask(_) => StatusCode::INTERNAL_SERVER_ERROR,
         };
 
         (status, self.to_string()).into_response()
@@ -624,8 +615,7 @@ mod tests {
         AppState::new(AppConfig {
             host: "127.0.0.1".to_string(),
             port: 12345,
-            mermaid_mode: MermaidMode::Local,
-            mermaid_cdn_url: "https://example.test/mermaid.js".to_string(),
+            mermaid_mode: MermaidMode::Merman,
         })
     }
 
@@ -740,6 +730,12 @@ mod tests {
         assert_eq!(rendered_body["revision"], 1);
         assert_eq!(rendered_body["has_mermaid"], true);
         assert_eq!(rendered_body["has_math"], true);
+        assert!(
+            rendered_body["html"]
+                .as_str()
+                .unwrap()
+                .contains("data:image/svg+xml;base64,")
+        );
 
         let update_response = app
             .oneshot(json_request(
@@ -755,6 +751,110 @@ mod tests {
             .unwrap();
         let update_body = response_json(update_response).await;
         assert_eq!(update_body["revision"], 2);
+    }
+
+    #[tokio::test]
+    async fn disabled_mermaid_applies_to_creation_update_and_export() {
+        let mut state = test_state();
+        state.config.mermaid_mode = MermaidMode::None;
+        let input = SessionInput {
+            path: "/tmp/a.md".into(),
+            title: "a.md".into(),
+            content: "```mermaid\ngraph TD\nA-->B\n```".into(),
+        };
+        let Json(created) = create_session(State(state.clone()), Json(input.clone()))
+            .await
+            .unwrap();
+        let _ = update_session(State(state.clone()), Path(created.session_id), Json(input))
+            .await
+            .unwrap();
+        let sessions = state.sessions.read().await;
+        let session = &sessions[&created.session_id];
+        assert!(session.rendered.has_mermaid);
+        let html = export_html(&state.config, session);
+        assert!(html.contains("language-mermaid"));
+        assert!(!html.contains("data:image/svg+xml;base64,"));
+    }
+
+    #[tokio::test]
+    async fn updates_are_serialized_without_holding_the_session_map_lock() {
+        let state = test_state();
+        let input = SessionInput {
+            path: "/tmp/a.md".into(),
+            title: "a.md".into(),
+            content: "# A".into(),
+        };
+        let Json(created) = create_session(State(state.clone()), Json(input.clone()))
+            .await
+            .unwrap();
+        let id = created.session_id;
+        let update_lock = state.sessions.read().await[&id].update_lock.clone();
+        let permits = state
+            .render_slots
+            .clone()
+            .acquire_many_owned(2)
+            .await
+            .unwrap();
+        let first_state = state.clone();
+        let mut first_input = input.clone();
+        first_input.content = "# First".into();
+        let first = tokio::spawn(async move {
+            update_session(State(first_state), Path(id), Json(first_input)).await
+        });
+        tokio::time::timeout(std::time::Duration::from_secs(2), async {
+            while update_lock.try_lock().is_ok() {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        // A queued render must not prevent reads or writes for other sessions.
+        let sessions = state
+            .sessions
+            .try_write()
+            .expect("render must not hold the map lock");
+        assert_eq!(sessions[&id].revision, 1);
+        drop(sessions);
+        let second_state = state.clone();
+        let mut second_input = input;
+        second_input.content = "# Second".into();
+        let second = tokio::spawn(async move {
+            update_session(State(second_state), Path(id), Json(second_input)).await
+        });
+        drop(permits);
+        assert_eq!(first.await.unwrap().unwrap().0.revision, 2);
+        assert_eq!(second.await.unwrap().unwrap().0.revision, 3);
+        let sessions = state.sessions.read().await;
+        assert_eq!(sessions[&id].content, "# Second");
+        assert!(sessions[&id].rendered.html.contains("<h1>Second</h1>"));
+    }
+
+    #[tokio::test]
+    async fn cancelled_request_keeps_worker_capacity_until_render_finishes() {
+        let state = test_state();
+        let (started_tx, started_rx) = tokio::sync::oneshot::channel();
+        let (finish_tx, finish_rx) = std::sync::mpsc::channel();
+        let worker_state = state.clone();
+        let task = tokio::spawn(async move {
+            run_render_job(&worker_state, move || {
+                started_tx.send(()).unwrap();
+                finish_rx.recv().unwrap();
+            })
+            .await
+        });
+        started_rx.await.unwrap();
+        assert_eq!(state.render_slots.available_permits(), 1);
+        task.abort();
+        assert!(task.await.unwrap_err().is_cancelled());
+        assert_eq!(state.render_slots.available_permits(), 1);
+        finish_tx.send(()).unwrap();
+        let _permits = tokio::time::timeout(
+            std::time::Duration::from_secs(2),
+            state.render_slots.clone().acquire_many_owned(2),
+        )
+        .await
+        .unwrap()
+        .unwrap();
     }
 
     #[tokio::test]
@@ -816,7 +916,7 @@ mod tests {
                 json!({
                     "path": "/tmp/a.md",
                     "title": "a.md",
-                    "content": "# Export\n\n$1+1$"
+                    "content": "# Export\n\n$1+1$\n\n```mermaid\ngraph TD\nA-->B\n```"
                 }),
             ))
             .await
@@ -839,6 +939,8 @@ mod tests {
         assert!(html.contains("<!doctype html>"));
         assert!(html.contains("/assets/katex/katex.min.css"));
         assert!(html.contains("<h1>Export</h1>"));
+        assert!(html.contains("data:image/svg+xml;base64,"));
+        assert!(!html.contains("mermaid.min.js"));
     }
 
     #[tokio::test]
@@ -846,8 +948,7 @@ mod tests {
         let state = AppState::new(AppConfig {
             host: "127.0.0.1".to_string(),
             port: 12345,
-            mermaid_mode: MermaidMode::Local,
-            mermaid_cdn_url: "https://example.test/mermaid.js".to_string(),
+            mermaid_mode: MermaidMode::Merman,
         });
         let app = app(state.clone());
         let create_response = app
@@ -921,25 +1022,6 @@ mod tests {
         );
     }
 
-    #[tokio::test]
-    async fn serves_mermaid_asset_with_content_type() {
-        let response = test_app()
-            .oneshot(
-                Request::builder()
-                    .uri("/assets/mermaid/mermaid.min.js")
-                    .body(Body::empty())
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-
-        assert_eq!(response.status(), StatusCode::OK);
-        assert_eq!(
-            response.headers().get(header::CONTENT_TYPE).unwrap(),
-            "text/javascript; charset=utf-8"
-        );
-    }
-
     #[test]
     fn prefers_assets_next_to_executable_over_build_directory() {
         let dir = temp_dir();
@@ -983,11 +1065,6 @@ mod tests {
         let assets = dir.join("assets");
         let files = [
             (
-                "mermaid/mermaid.min.js",
-                "text/javascript; charset=utf-8",
-                "installed mermaid",
-            ),
-            (
                 "katex/katex.min.js",
                 "text/javascript; charset=utf-8",
                 "installed katex",
@@ -1027,10 +1104,10 @@ mod tests {
             );
             assert_eq!(response_text(response).await, contents);
         }
-        // Do not fall back to the checkout's real Mermaid file if a selected asset is missing.
-        fs::remove_file(assets.join("mermaid/mermaid.min.js")).unwrap();
+        // Do not fall back to checkout assets if a selected asset is missing.
+        fs::remove_file(assets.join("katex/katex.min.js")).unwrap();
         for path in [
-            "mermaid/mermaid.min.js",
+            "katex/katex.min.js",
             "katex/missing.js",
             "katex/fonts/missing.woff2",
         ] {

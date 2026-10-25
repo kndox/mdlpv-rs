@@ -8,7 +8,7 @@ Neovim plugin が現在の Markdown buffer を Rust server に送り、server �
 
 ## Requirements
 
-- Rust toolchain
+- Rust toolchain 1.95+
 - `vim.system()` を使える Neovim
 - `curl`
 - `xdg-open`、`open`、Windows `start` などの desktop browser opener
@@ -55,7 +55,6 @@ Lazy.nvim で local checkout を使う例です。
       server_bin = binary,
       mermaid = {
         enabled = true,
-        mode = "local",
       },
     })
   end,
@@ -84,8 +83,6 @@ Lazy.nvim で GitHub から install する場合は、以下の形になりま�
       server_stderr_notify = false,
       mermaid = {
         enabled = true,
-        mode = "local",
-        cdn_url = "https://cdn.jsdelivr.net/npm/mermaid@11.15.0/dist/mermaid.min.js",
       },
       pdf_browser_cmd = nil,
       pdf_extra_args = {},
@@ -114,18 +111,11 @@ require("mdlive").setup({
   pdf_extra_args = {},
   mermaid = {
     enabled = true,
-    mode = "local",
-    cdn_url = "https://cdn.jsdelivr.net/npm/mermaid@11.15.0/dist/mermaid.min.js",
   },
 })
 ```
 
-Mermaid mode:
-
-- `local`: bundled offline Mermaid asset を使う。
-- `cdn`: `mermaid.cdn_url` から Mermaid を読み込む。
-- `none`: Mermaid rendering を無効化する。
-- `local-with-cdn-fallback`: bundled asset を試し、失敗時に CDN URL に fallback する。
+Mermaid は Rust の merman で描画します。`mermaid.enabled = false` で無効化できます。
 
 Commands:
 
@@ -140,15 +130,15 @@ Commands:
 
 ## Mermaid
 
-Mermaid は Markdown document に `mermaid` fenced code block がある場合だけ読み込まれます。
+Mermaid fenced code block は merman 0.9.2 でサーバー側で SVG に描画し、画像として埋め込みます。JavaScript の読み込みや CDN 接続は不要で、HTML／PDF エクスポートにも同じ図が含まれます。
 
-local offline asset を bundle するには以下を実行します。
+構文エラーやリソース制限超過時は、該当ブロックにソースとエラーを表示します。各図には merman の既定リソース制限と 5 秒の協調的な期限を適用します。HTML ラベルは SVG テキストに変換され、図のリンクや JavaScript による操作は利用できません。Mermaid.js と完全に同じ描画を保証するものではありません。
 
-```bash
-node scripts/fetch-mermaid.mjs
-```
+### 0.2.0 への移行
 
-`assets/mermaid/mermaid.min.js` が書き出されます。default version は `11.15.0` です。`MERMAID_VERSION` で上書きできます。
+- Lua 設定の `mermaid.enabled` は引き続き使用できます。`mode` と `cdn_url` は削除してください。旧設定を検出した場合は一度だけ通知し、`enabled` に従って動作します。旧 `mode = "none"` は `enabled = false` に置き換えてください。
+- CLI の `--mermaid-mode` は `merman`（既定）と `none` に変更しました。`--mermaid-cdn-url` は廃止しました。
+- プラグインとサーバーバイナリを一緒に更新してください。Mermaid.js の配布ファイルと取得スクリプトは不要になりました。
 
 ## Math
 
@@ -171,7 +161,7 @@ relative Markdown image path は Markdown file の parent directory から serve
 
 `mdlpv-rs` は MIT License です。詳細は `LICENSE` を参照してください。
 
-この repository は offline rendering 用に `mermaid@11.15.0` と `katex@0.16.25` を bundle しています。どちらも MIT License です。詳細は `THIRD_PARTY_NOTICES.md` を参照してください。
+Mermaid 描画には merman を使用し、数式用に `katex@0.16.25` を同梱します。ELK とフォントを含むライセンス情報は `THIRD_PARTY_NOTICES.md` を参照してください。
 
 ## Safety
 

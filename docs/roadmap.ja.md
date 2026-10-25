@@ -26,7 +26,7 @@ public release path が安定した後、以下を検討する。
 - Markdown session API を持つ Rust localhost server。
 - SSE live reload に対応した browser viewer。
 - Neovim Lua plugin commands と process management。
-- bundled local asset option 付き Mermaid lazy loading。
+- merman による server-side Mermaid 描画と SVG 画像埋め込み。
 - bundled assets を使う KaTeX-based math rendering。
 - directory containment check 付き relative image serving。
 - HTML/PDF export commands。

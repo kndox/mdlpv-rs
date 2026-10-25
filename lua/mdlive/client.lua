@@ -59,9 +59,7 @@ function M.ensure_server(cb)
     "--log-level",
     tostring(opts.server_log_level or "warn"),
     "--mermaid-mode",
-    opts.mermaid.mode,
-    "--mermaid-cdn-url",
-    opts.mermaid.cdn_url,
+    opts.mermaid.enabled == false and "none" or "merman",
   }
 
   local stdout = ""

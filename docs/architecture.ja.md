@@ -42,6 +42,8 @@ Mermaid は server 側では描画しない。Rust server は Mermaid fenced cod
 
 viewer は `has_mermaid=true` の場合だけ Mermaid JS を読み込む。default は local asset だが、`assets/mermaid/mermaid.min.js` が未配置なら 404 とし、viewer に明示的なエラーを表示する。local asset は `node scripts/fetch-mermaid.mjs` で取得できる。
 
+server は起動時に、実行ファイルの隣にある `assets` directory を Mermaid と KaTeX の配信元として選ぶ。その directory が存在しない場合は、source build 用にコンパイル時の Cargo manifest directory 内の `assets` を使う。選択した directory にファイルが欠けていても別の directory には切り替えない。配布版を移動する場合は、同梱の `assets` directory も実行ファイルの隣に配置する。
+
 ## Security stance
 
 v0.1 は localhost preview 専用であり、default は `127.0.0.1` bind とする。Markdown 内の raw HTML は render 時に text として escape する。

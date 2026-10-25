@@ -40,6 +40,8 @@ The server does not render Mermaid diagrams. It only detects Mermaid fenced code
 
 When `has_mermaid=true`, the viewer converts `pre > code.language-mermaid` to `div.mermaid` and lazy-loads Mermaid JS. The default mode is local asset loading. If `assets/mermaid/mermaid.min.js` is missing, the server returns 404 and the viewer shows an explicit error. The local asset can be fetched with `node scripts/fetch-mermaid.mjs`.
 
+At startup, the server uses the `assets` directory next to its executable for Mermaid and KaTeX. If that directory does not exist, it uses `assets` in the build-time Cargo manifest directory for source builds. Once a directory is selected, missing files are not loaded from another directory. Keep the packaged `assets` directory alongside the executable when moving a release installation.
+
 ## Security Stance
 
 v0.1 is localhost-only preview tooling. The default bind address is `127.0.0.1`. Raw HTML in Markdown is escaped during rendering.

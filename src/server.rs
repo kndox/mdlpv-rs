@@ -47,6 +47,7 @@ pub struct AppConfig {
 pub struct AppState {
     pub config: AppConfig,
     pub sessions: SharedSessions,
+    assets_root: PathBuf,
 }
 
 impl AppState {
@@ -54,6 +55,10 @@ impl AppState {
         Self {
             config,
             sessions: new_store(),
+            assets_root: select_assets_root(
+                std::env::current_exe().ok().as_deref(),
+                FsPath::new(env!("CARGO_MANIFEST_DIR")),
+            ),
         }
     }
 }
@@ -275,11 +280,8 @@ async fn style_css() -> impl IntoResponse {
     )
 }
 
-async fn mermaid_asset() -> Response {
-    let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("assets")
-        .join("mermaid")
-        .join("mermaid.min.js");
+async fn mermaid_asset(State(state): State<AppState>) -> Response {
+    let path = state.assets_root.join("mermaid").join("mermaid.min.js");
 
     match tokio::fs::read(path).await {
         Ok(bytes) => (
@@ -295,8 +297,11 @@ async fn mermaid_asset() -> Response {
     }
 }
 
-async fn katex_asset(Path(path): Path<String>) -> Result<Response, ApiError> {
-    let path = resolve_asset_file("katex", &path)?;
+async fn katex_asset(
+    State(state): State<AppState>,
+    Path(path): Path<String>,
+) -> Result<Response, ApiError> {
+    let path = resolve_asset_file(&state.assets_root, "katex", &path)?;
 
     match tokio::fs::read(&path).await {
         Ok(bytes) => Ok((
@@ -411,9 +416,23 @@ fn resolve_session_file(markdown_path: &str, encoded_path: &str) -> Result<PathB
     resolve_file_under_base(base, encoded_path)
 }
 
-fn resolve_asset_file(asset_dir: &str, encoded_path: &str) -> Result<PathBuf, ApiError> {
-    let base = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("assets")
+fn select_assets_root(executable: Option<&FsPath>, manifest_dir: &FsPath) -> PathBuf {
+    if let Some(root) = executable
+        .and_then(FsPath::parent)
+        .map(|parent| parent.join("assets"))
+        .filter(|root| root.is_dir())
+    {
+        return root;
+    }
+    manifest_dir.join("assets")
+}
+
+fn resolve_asset_file(
+    assets_root: &FsPath,
+    asset_dir: &str,
+    encoded_path: &str,
+) -> Result<PathBuf, ApiError> {
+    let base = assets_root
         .join(asset_dir)
         .canonicalize()
         .map_err(ApiError::Io)?;
@@ -601,13 +620,17 @@ mod tests {
     use std::{fs, path::PathBuf};
     use tower::ServiceExt;
 
-    fn test_app() -> Router {
-        app(AppState::new(AppConfig {
+    fn test_state() -> AppState {
+        AppState::new(AppConfig {
             host: "127.0.0.1".to_string(),
             port: 12345,
             mermaid_mode: MermaidMode::Local,
             mermaid_cdn_url: "https://example.test/mermaid.js".to_string(),
-        }))
+        })
+    }
+
+    fn test_app() -> Router {
+        app(test_state())
     }
 
     #[tokio::test]
@@ -918,9 +941,139 @@ mod tests {
     }
 
     #[test]
+    fn prefers_assets_next_to_executable_over_build_directory() {
+        let dir = temp_dir();
+        let installed_assets = dir.join("installed/assets");
+        let manifest_dir = dir.join("build");
+        fs::create_dir_all(&installed_assets).unwrap();
+        fs::create_dir_all(manifest_dir.join("assets")).unwrap();
+
+        assert_eq!(
+            select_assets_root(Some(&dir.join("installed/mdlpv-rs")), &manifest_dir),
+            installed_assets
+        );
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn falls_back_to_build_assets_when_executable_assets_are_unavailable() {
+        let dir = temp_dir();
+        let manifest_dir = dir.join("build");
+        fs::create_dir_all(manifest_dir.join("assets")).unwrap();
+        // A file named assets is not an asset directory.
+        fs::create_dir_all(dir.join("installed")).unwrap();
+        fs::write(dir.join("installed/assets"), b"not a directory").unwrap();
+
+        for executable in [
+            None,
+            Some(dir.join("installed/mdlpv-rs")),
+            Some(dir.join("target/debug/mdlpv-rs")),
+        ] {
+            assert_eq!(
+                select_assets_root(executable.as_deref(), &manifest_dir),
+                manifest_dir.join("assets")
+            );
+        }
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[tokio::test]
+    async fn serves_relocated_assets_without_build_directory() {
+        let dir = temp_dir();
+        let assets = dir.join("assets");
+        let files = [
+            (
+                "mermaid/mermaid.min.js",
+                "text/javascript; charset=utf-8",
+                "installed mermaid",
+            ),
+            (
+                "katex/katex.min.js",
+                "text/javascript; charset=utf-8",
+                "installed katex",
+            ),
+            (
+                "katex/katex.min.css",
+                "text/css; charset=utf-8",
+                "installed stylesheet",
+            ),
+            ("katex/fonts/test.woff2", "font/woff2", "installed font"),
+        ];
+        for (path, _, contents) in files {
+            let path = assets.join(path);
+            fs::create_dir_all(path.parent().unwrap()).unwrap();
+            fs::write(path, contents).unwrap();
+        }
+        let mut state = test_state();
+        state.assets_root =
+            select_assets_root(Some(&dir.join("mdlpv-rs")), &dir.join("missing-build"));
+        let app = app(state);
+
+        for (path, content_type, contents) in files {
+            let response = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .uri(format!("/assets/{path}"))
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::OK);
+            assert_eq!(
+                response.headers().get(header::CONTENT_TYPE).unwrap(),
+                content_type
+            );
+            assert_eq!(response_text(response).await, contents);
+        }
+        // Do not fall back to the checkout's real Mermaid file if a selected asset is missing.
+        fs::remove_file(assets.join("mermaid/mermaid.min.js")).unwrap();
+        for path in [
+            "mermaid/mermaid.min.js",
+            "katex/missing.js",
+            "katex/fonts/missing.woff2",
+        ] {
+            let response = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .uri(format!("/assets/{path}"))
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::NOT_FOUND);
+        }
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn rejects_asset_symlinks_outside_selected_directory() {
+        let dir = temp_dir();
+        let assets = dir.join("assets");
+        fs::create_dir_all(assets.join("katex")).unwrap();
+        let outside = dir.join("outside.js");
+        fs::write(&outside, b"outside").unwrap();
+        std::os::unix::fs::symlink(outside, assets.join("katex/link.js")).unwrap();
+
+        assert!(matches!(
+            resolve_asset_file(&assets, "katex", "link.js"),
+            Err(ApiError::Forbidden)
+        ));
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
     fn rejects_asset_path_traversal() {
         assert!(matches!(
-            resolve_asset_file("katex", "%2E%2E/mermaid/mermaid.min.js"),
+            resolve_asset_file(
+                &FsPath::new(env!("CARGO_MANIFEST_DIR")).join("assets"),
+                "katex",
+                "%2E%2E/mermaid/mermaid.min.js"
+            ),
             Err(ApiError::Forbidden)
         ));
     }

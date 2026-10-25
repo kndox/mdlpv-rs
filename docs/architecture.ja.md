@@ -6,7 +6,7 @@
 
 - Lua plugin は user command、server process 管理、buffer 内容の POST、browser 起動だけを担当する。
 - Rust server は HTTP API、session 管理、Markdown render、SSE、asset 配信を担当する。
-- Browser viewer は rendered HTML の fetch、SSE 購読、DOM 差し替え、Mermaid lazy load を担当する。
+- Browser viewer は rendered HTML の fetch、SSE 購読、DOM 差し替え、サーバーで描画した Mermaid 画像の表示を担当する。
 
 ## Data flow
 
@@ -38,11 +38,11 @@ v0.1 では process 内 memory のみで保持し、永続化しない。
 
 ## Mermaid
 
-Mermaid は server 側では描画しない。Rust server は Mermaid fenced code block の有無だけを判定し、viewer に `has_mermaid` として返す。
+Mermaid fenced code block は server 側で merman を使って SVG 画像に描画する。`has_mermaid` は描画無効時も含めた fence の検出情報として維持する。
 
-viewer は `has_mermaid=true` の場合だけ Mermaid JS を読み込む。default は local asset だが、`assets/mermaid/mermaid.min.js` が未配置なら 404 とし、viewer に明示的なエラーを表示する。local asset は `node scripts/fetch-mermaid.mjs` で取得できる。
+描画は blocking worker で同時に最大 2 件まで実行する。更新は session 単位で直列化し、描画中は session 一覧の lock を保持しない。HTML sanitize 後に、内部生成した placeholder のみを SVG data 画像へ置き換える。図の失敗時は文書全体を失敗させず、エスケープ済みのソースとエラーを表示する。
 
-server は起動時に、実行ファイルの隣にある `assets` directory を Mermaid と KaTeX の配信元として選ぶ。その directory が存在しない場合は、source build 用にコンパイル時の Cargo manifest directory 内の `assets` を使う。選択した directory にファイルが欠けていても別の directory には切り替えない。配布版を移動する場合は、同梱の `assets` directory も実行ファイルの隣に配置する。
+server は起動時に、実行ファイルの隣にある `assets` directory を KaTeX の配信元として選ぶ。その directory が存在しない場合は、source build 用にコンパイル時の Cargo manifest directory 内の `assets` を使う。選択した directory にファイルが欠けていても別の directory には切り替えない。配布版を移動する場合は、同梱の `assets` directory も実行ファイルの隣に配置する。
 
 ## Security stance
 

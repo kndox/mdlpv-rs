@@ -8,7 +8,7 @@ The Neovim plugin sends the current Markdown buffer to the Rust server, the serv
 
 ## Requirements
 
-- Rust toolchain
+- Rust toolchain 1.95+
 - Neovim with `vim.system()` support
 - `curl`
 - A desktop browser opener such as `xdg-open`, `open`, or Windows `start`
@@ -55,7 +55,6 @@ For a local checkout managed by Lazy.nvim:
       server_bin = binary,
       mermaid = {
         enabled = true,
-        mode = "local",
       },
     })
   end,
@@ -84,8 +83,6 @@ For a GitHub install with Lazy.nvim, use:
       server_stderr_notify = false,
       mermaid = {
         enabled = true,
-        mode = "local",
-        cdn_url = "https://cdn.jsdelivr.net/npm/mermaid@11.15.0/dist/mermaid.min.js",
       },
       pdf_browser_cmd = nil,
       pdf_extra_args = {},
@@ -114,18 +111,11 @@ require("mdlive").setup({
   pdf_extra_args = {},
   mermaid = {
     enabled = true,
-    mode = "local",
-    cdn_url = "https://cdn.jsdelivr.net/npm/mermaid@11.15.0/dist/mermaid.min.js",
   },
 })
 ```
 
-Mermaid modes:
-
-- `local`: use the bundled offline Mermaid asset.
-- `cdn`: load Mermaid from `mermaid.cdn_url`.
-- `none`: disable Mermaid rendering.
-- `local-with-cdn-fallback`: try the bundled asset first, then fall back to the CDN URL.
+Mermaid diagrams render in Rust using merman. Set `mermaid.enabled = false` to disable rendering.
 
 Commands:
 
@@ -140,15 +130,15 @@ On normal Neovim exit, `VimLeavePre` sends SIGTERM to the server process. If Neo
 
 ## Mermaid
 
-Mermaid is loaded only when a Markdown document contains a `mermaid` fenced code block.
+Mermaid fenced code blocks render on the server with merman 0.9.2 as embedded SVG images. They need no Mermaid JavaScript or CDN connection, and the same images are included in HTML/PDF exports.
 
-To bundle the local offline asset:
+Malformed diagrams and resource limit failures show their source and an error in that block. Each diagram uses merman's default resource limits and a five-second cooperative deadline. HTML labels are converted to SVG text; interactive links and JavaScript actions within diagrams are unavailable. Rendering is not guaranteed to match Mermaid.js exactly.
 
-```bash
-node scripts/fetch-mermaid.mjs
-```
+### Migrating to 0.2.0
 
-This writes `assets/mermaid/mermaid.min.js`. The default version is `11.15.0`; override it with `MERMAID_VERSION`.
+- Keep `mermaid.enabled`; remove `mode` and `cdn_url`. Legacy options trigger one migration warning and rendering follows `enabled`. Replace legacy `mode = "none"` with `enabled = false`.
+- CLI `--mermaid-mode` now accepts `merman` (default) or `none`. `--mermaid-cdn-url` has been removed.
+- Update the plugin and server binary together. The Mermaid.js distribution and fetch script are no longer needed.
 
 ## Math
 
@@ -171,7 +161,7 @@ Use `:MdLiveExportPdf` to print the exported HTML through a headless browser and
 
 `mdlpv-rs` is licensed under the MIT License; see `LICENSE`.
 
-This repository bundles `mermaid@11.15.0` and `katex@0.16.25` for offline rendering. Both are licensed under the MIT License; see `THIRD_PARTY_NOTICES.md`.
+Mermaid rendering uses merman; browser math uses bundled `katex@0.16.25`. See `THIRD_PARTY_NOTICES.md` for licenses, including ELK and embedded fonts.
 
 ## Safety
 

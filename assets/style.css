@@ -107,6 +107,10 @@ img {
   overflow-x: auto;
 }
 
+.mermaid img {
+  height: auto;
+}
+
 .math-display {
   margin: 24px 0;
   overflow-x: auto;

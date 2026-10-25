@@ -26,7 +26,7 @@ These may be considered after the public release path is stable:
 - Rust localhost server with Markdown session APIs.
 - Browser viewer with SSE live reload.
 - Neovim Lua plugin commands and process management.
-- Mermaid lazy loading with a bundled local asset option.
+- Server-side Mermaid rendering with merman and embedded SVG images.
 - KaTeX-based math rendering with bundled assets.
 - Relative image serving with directory containment checks.
 - HTML and PDF export commands.

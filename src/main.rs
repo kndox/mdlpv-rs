@@ -1,4 +1,5 @@
 mod markdown;
+mod mermaid;
 mod server;
 mod session;
 
@@ -18,14 +19,8 @@ pub struct Cli {
     #[arg(long, default_value_t = 0)]
     port: u16,
 
-    #[arg(long, value_enum, default_value_t = MermaidMode::Local)]
+    #[arg(long, value_enum, default_value_t = MermaidMode::Merman)]
     mermaid_mode: MermaidMode,
-
-    #[arg(
-        long,
-        default_value = "https://cdn.jsdelivr.net/npm/mermaid@11.15.0/dist/mermaid.min.js"
-    )]
-    mermaid_cdn_url: String,
 
     #[arg(long, default_value = "info")]
     log_level: String,
@@ -34,10 +29,8 @@ pub struct Cli {
 #[derive(Debug, Clone, Copy, Serialize, ValueEnum)]
 #[serde(rename_all = "kebab-case")]
 pub enum MermaidMode {
-    Local,
-    Cdn,
+    Merman,
     None,
-    LocalWithCdnFallback,
 }
 
 #[derive(Debug, Serialize)]
@@ -64,7 +57,6 @@ async fn main() -> anyhow::Result<()> {
         host: cli.host.clone(),
         port,
         mermaid_mode: cli.mermaid_mode,
-        mermaid_cdn_url: cli.mermaid_cdn_url,
     };
     let app = server::app(server::AppState::new(app_config));
 
@@ -102,5 +94,29 @@ fn init_tracing(level: &str) -> anyhow::Result<()> {
 async fn shutdown_signal() {
     if let Err(err) = tokio::signal::ctrl_c().await {
         tracing::warn!(%err, "failed to listen for shutdown signal");
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn mermaid_cli_uses_native_renderer_or_none() {
+        assert!(matches!(
+            Cli::try_parse_from(["mdlpv-rs"]).unwrap().mermaid_mode,
+            MermaidMode::Merman
+        ));
+        assert!(matches!(
+            Cli::try_parse_from(["mdlpv-rs", "--mermaid-mode", "none"])
+                .unwrap()
+                .mermaid_mode,
+            MermaidMode::None
+        ));
+        assert!(Cli::try_parse_from(["mdlpv-rs", "--mermaid-mode", "local"]).is_err());
+        assert!(
+            Cli::try_parse_from(["mdlpv-rs", "--mermaid-cdn-url", "https://example.test/m.js"])
+                .is_err()
+        );
     }
 }

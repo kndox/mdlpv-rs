@@ -23,7 +23,7 @@ Browser viewer
   -> rendered HTML を fetch する
   -> session event を subscribe する
   -> preview DOM を差し替える
-  -> Mermaid が必要な時だけ lazy-load する
+  -> merman で描画した SVG 画像を表示する
 ```
 
 ## Public interfaces
@@ -41,7 +41,7 @@ Server defaults:
 
 - `--host 127.0.0.1`
 - `--port 0`
-- `--mermaid-mode local`
+- `--mermaid-mode merman`
 - `--log-level info`
 
 server は bind 後に stdout へ startup JSON を 1 行出す。
@@ -67,7 +67,6 @@ Neovim plugin と viewer は以下の server routes を使う。
 - `GET /view/{session_id}`
 - `GET /assets/viewer.js`
 - `GET /assets/style.css`
-- `GET /assets/mermaid/mermaid.min.js`
 
 session は Markdown buffer ごとに作られ、memory のみに保持される。
 
@@ -75,7 +74,7 @@ session は Markdown buffer ごとに作られ、memory のみに保持される
 
 Markdown rendering には `pulldown-cmark` を使い、tables、footnotes、strikethrough、task lists を有効にする。
 
-Mermaid は Rust 側では render しない。server は Mermaid fenced code block を検出して `has_mermaid` を返す。viewer は Mermaid code block を変換し、設定された mode に従って Mermaid を読み込む。
+Mermaid fenced code block は Rust の merman で SVG 画像に描画する。`--mermaid-mode none` ではソースを code として表示し、`has_mermaid` は検出情報として維持する。viewer と HTML／PDF export は同じ描画済み画像を使う。
 
 inline math と display math は bundled KaTeX assets を使って browser 側で render する。
 
@@ -85,7 +84,7 @@ default bind address は `127.0.0.1` であり、local preview 用途を前提�
 
 Markdown 内の raw HTML は allowlist ベースで sanitize して render する。危険な tag、event handler attribute、安全でない URL は除去する。relative Markdown image は Markdown file の parent directory から serve し、その directory 外の path は拒否する。raw HTML 内の relative URL は image API 用に rewrite しない。
 
-Mermaid は browser 側で `securityLevel: "strict"` を指定する。
+Merman は strict 設定、有限の既定リソース制限、図ごとに 5 秒の協調的な期限を使う。Markdown の sanitize 後に生成した SVG のみ画像として埋め込み、任意の raw SVG や data URL は許可しない。失敗時は該当ブロックにエスケープ済みのソースとエラーを表示する。
 
 ## v0.1 non-goals
 

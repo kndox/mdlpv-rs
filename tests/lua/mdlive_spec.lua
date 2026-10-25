@@ -119,6 +119,24 @@ local browser_module = require("mdlive.browser")
 local client = require("mdlive.client")
 local config = require("mdlive.config")
 local install = require("mdlive.install")
+local function count_mermaid_migration_warnings()
+  local count = 0
+  for _, notification in ipairs(notifications) do
+    if notification.message:match("mermaid.mode and mermaid.cdn_url were removed") then
+      count = count + 1
+    end
+  end
+  return count
+end
+config.setup({ mermaid = { enabled = false, mode = "cdn", cdn_url = "https://example.test/mermaid.js" } })
+wait_for(function() return count_mermaid_migration_warnings() == 1 end, "missing Mermaid migration warning")
+assert_true(config.options.mermaid.enabled == false, "legacy settings overrode enabled=false")
+assert_true(config.options.mermaid.mode == nil and config.options.mermaid.cdn_url == nil, "legacy options were retained")
+config.setup({ mermaid = { mode = "none" } })
+vim.wait(20)
+assert_true(config.options.mermaid.enabled == true, "legacy mode overrode the new default")
+assert_true(count_mermaid_migration_warnings() == 1, "migration warning repeated")
+
 mdlive.setup({
   open_browser = false,
   debounce_ms = 1,
@@ -155,6 +173,8 @@ vim.wait(50)
 assert_true(count_mdlive_server_notifications() == 0, "server stderr was notified by default")
 
 local server_call = calls[1]
+assert_true(vim.tbl_contains(server_call.args, "merman"), "native Mermaid renderer was not selected")
+assert_true(not vim.tbl_contains(server_call.args, "--mermaid-cdn-url"), "obsolete CDN flag was passed")
 assert_true(vim.tbl_contains(server_call.args, "--log-level"), "server log level flag was not passed")
 assert_true(vim.tbl_contains(server_call.args, "warn"), "default server log level was not warn")
 

@@ -23,7 +23,7 @@ Browser viewer
   -> fetches rendered HTML
   -> subscribes to session events
   -> replaces the preview DOM
-  -> lazy-loads Mermaid only when needed
+  -> displays SVG images rendered by merman
 ```
 
 ## Public Interfaces
@@ -41,7 +41,7 @@ Server defaults:
 
 - `--host 127.0.0.1`
 - `--port 0`
-- `--mermaid-mode local`
+- `--mermaid-mode merman`
 - `--log-level info`
 
 The server prints one startup JSON line to stdout after binding:
@@ -67,7 +67,6 @@ The Neovim plugin and viewer use these server routes:
 - `GET /view/{session_id}`
 - `GET /assets/viewer.js`
 - `GET /assets/style.css`
-- `GET /assets/mermaid/mermaid.min.js`
 
 Sessions are per Markdown buffer and are stored only in memory.
 
@@ -75,7 +74,7 @@ Sessions are per Markdown buffer and are stored only in memory.
 
 Markdown is rendered with `pulldown-cmark` using tables, footnotes, strikethrough, and task lists.
 
-Mermaid is not rendered by Rust. The server detects Mermaid fenced code blocks and returns `has_mermaid`. The viewer then converts Mermaid code blocks and loads Mermaid according to the configured mode.
+Mermaid fenced code blocks are rendered in Rust using merman and embedded as SVG images. `--mermaid-mode none` preserves the source as code; `has_mermaid` remains detection metadata. The viewer and HTML/PDF export share the rendered images.
 
 Inline and display math are rendered in the browser with bundled KaTeX assets.
 
@@ -85,7 +84,7 @@ The default bind address is `127.0.0.1`, and the tool is intended for local prev
 
 Raw HTML in Markdown is rendered through an allowlist-based sanitizer. Dangerous tags, event handler attributes, and unsafe URLs are removed. Relative Markdown images are served from the Markdown file's parent directory, and paths outside that directory are rejected. Relative URLs inside raw HTML are not rewritten to the image API.
 
-Mermaid runs in the browser with `securityLevel: "strict"`.
+Merman uses strict security settings, finite default resource limits, and a five-second cooperative deadline per diagram. Generated SVG is embedded as an image after Markdown sanitization, without permitting arbitrary raw SVG or data URLs. Errors show escaped source and diagnostics in the affected block.
 
 ## Non-goals for v0.1
 

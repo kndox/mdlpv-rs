@@ -44,3 +44,9 @@ repository を public にする前に以下を確認する。
 ## Remaining work
 
 - 最初の public release を GitHub 上で確認してから、prebuilt Lazy.nvim install path を告知する。
+
+## 0.2.0
+
+Mermaid 描画を merman 0.9.2 に統一。プラグインとサーバーバイナリを同時に更新してください。Lua の `mermaid.mode`／`mermaid.cdn_url` は廃止し、`mermaid.enabled` を維持します。CLI の mode は `merman`／`none` です。ビルドには Rust 1.95 以上が必要です。
+
+`docs/third-party/merman/` はバイナリ内の ELK とフォントを含むライセンス本文・通知を保持します。既存のアーカイブ作成処理が `docs/` 全体を同梱するため、この directory も必ず配布してください。

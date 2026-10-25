@@ -6,7 +6,7 @@ The plugin has three layers: a Neovim Lua plugin, a Rust server, and a browser v
 
 - The Lua plugin owns user commands, server process management, buffer POSTs, and browser opening.
 - The Rust server owns HTTP APIs, session storage, Markdown rendering, SSE, and asset serving.
-- The browser viewer owns rendered HTML fetching, SSE subscription, DOM replacement, and Mermaid lazy loading.
+- The browser viewer owns rendered HTML fetching, SSE subscription, DOM replacement, and display of server-rendered Mermaid images.
 
 ## Data Flow
 
@@ -36,11 +36,11 @@ Sessions are per Markdown buffer and are stored only in memory for v0.1. A sessi
 
 ## Mermaid
 
-The server does not render Mermaid diagrams. It only detects Mermaid fenced code blocks and returns `has_mermaid`.
+The server renders Mermaid fenced code blocks with merman as embedded SVG images. `has_mermaid` remains fence-detection metadata, including when rendering is disabled.
 
-When `has_mermaid=true`, the viewer converts `pre > code.language-mermaid` to `div.mermaid` and lazy-loads Mermaid JS. The default mode is local asset loading. If `assets/mermaid/mermaid.min.js` is missing, the server returns 404 and the viewer shows an explicit error. The local asset can be fetched with `node scripts/fetch-mermaid.mjs`.
+Rendering runs on blocking workers with at most two jobs at once. Updates are serialized per session; rendering does not hold the session-map lock. The HTML sanitizer runs before server-generated placeholders are replaced with SVG data images. Diagram failures display escaped source and diagnostics without failing the document.
 
-At startup, the server uses the `assets` directory next to its executable for Mermaid and KaTeX. If that directory does not exist, it uses `assets` in the build-time Cargo manifest directory for source builds. Once a directory is selected, missing files are not loaded from another directory. Keep the packaged `assets` directory alongside the executable when moving a release installation.
+At startup, the server uses the `assets` directory next to its executable for KaTeX. If that directory does not exist, it uses `assets` in the build-time Cargo manifest directory for source builds. Once a directory is selected, missing files are not loaded from another directory. Keep the packaged `assets` directory alongside the executable when moving a release installation.
 
 ## Security Stance
 

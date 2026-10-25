@@ -16,8 +16,6 @@ M.defaults = {
   pdf_extra_args = {},
   mermaid = {
     enabled = true,
-    mode = "local",
-    cdn_url = "https://cdn.jsdelivr.net/npm/mermaid@11.15.0/dist/mermaid.min.js",
   },
 }
 
@@ -27,11 +25,19 @@ local function merge(defaults, opts)
   return vim.tbl_deep_extend("force", defaults, opts or {})
 end
 
+local warned_mermaid_options = false
+
 function M.setup(opts)
-  M.options = merge(vim.deepcopy(M.defaults), opts)
-  if M.options.mermaid.enabled == false then
-    M.options.mermaid.mode = "none"
+  local mermaid = opts and opts.mermaid
+  if mermaid and (mermaid.mode ~= nil or mermaid.cdn_url ~= nil) and not warned_mermaid_options then
+    warned_mermaid_options = true
+    vim.schedule(function()
+      vim.notify("mdlive 0.2.0: mermaid.mode and mermaid.cdn_url were removed; use mermaid.enabled. Diagrams now render with merman.", vim.log.levels.WARN)
+    end)
   end
+  M.options = merge(vim.deepcopy(M.defaults), opts)
+  M.options.mermaid.mode = nil
+  M.options.mermaid.cdn_url = nil
   return M.options
 end
 

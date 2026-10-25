@@ -1,5 +1,5 @@
 use cssparser::{Parser as CssParser, ParserInput as CssParserInput, Token};
-use pulldown_cmark::{CowStr, Event, Options, Parser, Tag, html};
+use pulldown_cmark::{CodeBlockKind, CowStr, Event, Options, Parser, Tag, TagEnd, html};
 use std::{borrow::Cow, collections::HashSet, ops::Range};
 use uuid::Uuid;
 
@@ -47,7 +47,11 @@ pub struct RenderedMarkdown {
     pub has_math: bool,
 }
 
-pub fn render_markdown(input: &str, session_id: Option<Uuid>) -> RenderedMarkdown {
+pub fn render_markdown(
+    input: &str,
+    session_id: Option<Uuid>,
+    mermaid_enabled: bool,
+) -> RenderedMarkdown {
     let stripped = strip_frontmatter(input);
     let input = stripped.content;
     let mut options = Options::empty();
@@ -59,18 +63,62 @@ pub fn render_markdown(input: &str, session_id: Option<Uuid>) -> RenderedMarkdow
 
     let has_math = Parser::new_ext(input, options)
         .any(|event| matches!(event, Event::InlineMath(_) | Event::DisplayMath(_)));
-    let parser = Parser::new_ext(input, options)
-        .into_offset_iter()
-        .flat_map(|(event, range)| {
-            render_events(event, range, input, stripped.line_offset, session_id)
-        });
+    let mut parser = Parser::new_ext(input, options).into_offset_iter();
+    let mut events = Vec::new();
+    let mut diagrams = Vec::new();
+    let mut has_mermaid = false;
+    while let Some((event, range)) = parser.next() {
+        let is_mermaid = matches!(&event, Event::Start(Tag::CodeBlock(CodeBlockKind::Fenced(info)))
+            if info.split(|ch: char| ch.is_whitespace() || ch == '{')
+                .next().is_some_and(|lang| lang.eq_ignore_ascii_case("mermaid")));
+        has_mermaid |= is_mermaid;
+        if is_mermaid && mermaid_enabled {
+            events.push(source_anchor(source_line(
+                input,
+                range.start,
+                stripped.line_offset,
+            )));
+            let mut source = String::new();
+            for (event, _) in parser.by_ref() {
+                match event {
+                    Event::End(TagEnd::CodeBlock) => break,
+                    Event::Text(text) => source.push_str(&text),
+                    _ => {}
+                }
+            }
+            match crate::mermaid::render_image(&source) {
+                Ok(image) => {
+                    let placeholder = format!(r#"<span id="mdlive-mermaid-{}"></span>"#, Uuid::new_v4());
+                    events.push(Event::Html(placeholder.clone().into()));
+                    diagrams.push((placeholder, image));
+                }
+                Err(error) => events.push(Event::Html(format!(
+                    "<div class=\"mermaid-error\"><p>Mermaid: {}</p><pre><code class=\"language-mermaid\">{}</code></pre></div>",
+                    escape_html_text(&error.to_string()), escape_html_text(&source)
+                ).into())),
+            }
+        } else {
+            events.extend(render_events(
+                event,
+                range,
+                input,
+                stripped.line_offset,
+                session_id,
+            ));
+        }
+    }
     let mut html = String::new();
-    html::push_html(&mut html, parser);
-    let html = sanitize_rendered_html(&html);
+    html::push_html(&mut html, events.into_iter());
+    let mut html = sanitize_rendered_html(&html);
+    // Only server-generated, unpredictable placeholders can bypass HTML sanitization.
+    // SVG stays in an image document, isolated from the viewer's DOM and scripts.
+    for (placeholder, image) in diagrams {
+        html = html.replace(&placeholder, &image);
+    }
 
     RenderedMarkdown {
         html,
-        has_mermaid: has_mermaid_fence(input),
+        has_mermaid,
         has_math,
     }
 }
@@ -252,22 +300,6 @@ fn source_line(input: &str, byte_offset: usize, line_offset: usize) -> usize {
         + 1
 }
 
-fn has_mermaid_fence(input: &str) -> bool {
-    input.lines().any(|line| {
-        let trimmed = line.trim_start();
-        let Some(rest) = trimmed
-            .strip_prefix("```")
-            .or_else(|| trimmed.strip_prefix("~~~"))
-        else {
-            return false;
-        };
-        rest.trim_start()
-            .split(|ch: char| ch.is_whitespace() || ch == '{')
-            .next()
-            .is_some_and(|lang| lang.eq_ignore_ascii_case("mermaid"))
-    })
-}
-
 fn image_api_url(session_id: Uuid, dest_url: &str) -> Option<Box<str>> {
     if dest_url.is_empty()
         || dest_url.starts_with('/')
@@ -291,6 +323,10 @@ fn escape_html_text(input: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn render_markdown(input: &str, session_id: Option<Uuid>) -> RenderedMarkdown {
+        super::render_markdown(input, session_id, true)
+    }
 
     #[test]
     fn renders_markdown_extensions() {
@@ -331,6 +367,127 @@ mod tests {
         let rendered = render_markdown("~~~ mermaid {#chart}\ngraph TD\nA-->B\n~~~", None);
 
         assert!(rendered.has_mermaid);
+    }
+
+    fn svg_images(html: &str) -> Vec<String> {
+        use base64::{Engine as _, engine::general_purpose::STANDARD};
+        html.split("data:image/svg+xml;base64,")
+            .skip(1)
+            .map(|part| {
+                String::from_utf8(STANDARD.decode(part.split('"').next().unwrap()).unwrap())
+                    .unwrap()
+            })
+            .collect()
+    }
+
+    #[test]
+    fn renders_mermaid_families_as_self_contained_images() {
+        for source in [
+            "flowchart TD\nA[開始]-->B[終了]",
+            "sequenceDiagram\nAlice->>Bob: Hello",
+            "classDiagram\nAnimal <|-- Duck",
+            "stateDiagram-v2\n[*] --> Active",
+            "erDiagram\nCUSTOMER ||--o{ ORDER : places",
+        ] {
+            let rendered = render_markdown(&format!("```mermaid\n{source}\n```"), None);
+            let images = svg_images(&rendered.html);
+            assert_eq!(images.len(), 1, "{source}: {}", rendered.html);
+            assert!(images[0].contains("<svg"));
+            assert!(images[0].contains("viewBox"));
+            let svg = roxmltree::Document::parse(&images[0]).unwrap();
+            let view_box: Vec<f64> = svg
+                .root_element()
+                .attribute("viewBox")
+                .unwrap()
+                .split_whitespace()
+                .map(|value| value.parse().unwrap())
+                .collect();
+            assert!(rendered.html.contains(&format!(
+                r#"width="{}" height="{}""#,
+                view_box[2].ceil(),
+                view_box[3].ceil()
+            )));
+            assert!(!images[0].contains("<foreignObject"));
+            if source.contains("開始") {
+                assert!(images[0].contains("開始"));
+            }
+        }
+    }
+
+    #[test]
+    fn renders_multiple_diagrams_with_attributes_and_source_anchors() {
+        let rendered = render_markdown(
+            "---\ntitle: A\n---\n~~~ MeRmAiD {#chart}\ngraph TD\nA-->B\n~~~\n\n```mermaid\ngraph LR\nC-->D\n```",
+            None,
+        );
+        assert_eq!(svg_images(&rendered.html).len(), 2);
+        assert!(rendered.html.contains(r#"data-source-line="4""#));
+        assert!(rendered.html.contains(r#"data-source-line="9""#));
+        assert!(!rendered.html.contains("mdlive-mermaid-"));
+    }
+
+    #[test]
+    fn disabled_mermaid_preserves_code_and_detection() {
+        let rendered = super::render_markdown("```mermaid\ngraph TD\nA-->B\n```", None, false);
+        assert!(rendered.has_mermaid);
+        assert!(rendered.html.contains(r#"class="language-mermaid""#));
+        assert!(svg_images(&rendered.html).is_empty());
+    }
+
+    #[test]
+    fn does_not_detect_mermaid_inside_other_code_or_plain_text() {
+        for source in [
+            "````text\n```mermaid\ngraph TD\nA-->B\n```\n````",
+            "text: ```mermaid",
+            "    ```mermaid\n    graph TD",
+        ] {
+            let rendered = render_markdown(source, None);
+            assert!(!rendered.has_mermaid, "{source}");
+            assert!(svg_images(&rendered.html).is_empty());
+        }
+    }
+
+    #[test]
+    fn malformed_diagram_preserves_source_and_other_blocks() {
+        let rendered = render_markdown(
+            "```mermaid\nnot a diagram <script>alert(1)</script>\n```\n\n# Still here\n\n```mermaid\ngraph TD\nA-->B\n```",
+            None,
+        );
+        assert!(rendered.html.contains("mermaid-error"));
+        assert!(rendered.html.contains("not a diagram &lt;script&gt;"));
+        assert!(!rendered.html.contains("<script>"));
+        assert!(rendered.html.contains("<h1>Still here</h1>"));
+        assert_eq!(svg_images(&rendered.html).len(), 1);
+    }
+
+    #[test]
+    fn image_embedding_does_not_weaken_raw_html_sanitization() {
+        let rendered = render_markdown(
+            r#"<img src="data:image/svg+xml;base64,PHN2Zz4=" onerror="alert(1)">
+<svg onload="alert(1)"></svg>
+
+```mermaid
+%%{init: {"htmlLabels": true, "securityLevel": "loose"}}%%
+flowchart TD
+A["<img src=x onerror=alert(1)>"]
+```"#,
+            None,
+        );
+        assert!(!rendered.html.contains("<svg"));
+        assert!(!rendered.html.contains("onerror="));
+        assert_eq!(svg_images(&rendered.html).len(), 1);
+        assert!(!svg_images(&rendered.html)[0].contains("<foreignObject"));
+    }
+
+    #[test]
+    fn oversized_diagram_reports_resource_limit() {
+        let limit = merman::svg::RenderResourcePolicy::default()
+            .value(merman::svg::ResourceLimitId::MaxSourceBytes)
+            .unwrap();
+        let source = format!("```mermaid\ngraph TD\n%% {}\n```", "x".repeat(limit));
+        let rendered = render_markdown(&source, None);
+        assert!(rendered.html.contains("mermaid-error"));
+        assert!(rendered.html.contains("max_source_bytes"));
     }
 
     #[test]
@@ -488,7 +645,7 @@ mod tests {
 
         assert!(rendered.html.contains(r#"type="checkbox""#));
         assert!(rendered.html.contains(r#"checked"#));
-        assert!(rendered.html.contains(r#"class="language-mermaid""#));
+        assert!(rendered.html.contains("data:image/svg+xml;base64,"));
         assert!(rendered.html.contains(r#"class="math math-inline""#));
         assert!(rendered.html.contains(r#"class="mdlive-source-anchor""#));
         assert!(rendered.html.contains(r#"data-source-line="1""#));

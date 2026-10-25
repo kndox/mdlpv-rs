@@ -11,7 +11,7 @@ cargo clippy -- -D warnings
 NVIM_LOG_FILE=/tmp/mdlive-nvim.log nvim --headless -u NONE -n -l tests/lua/mdlive_spec.lua
 ```
 
-Rust の test は Markdown render、安全な raw HTML の render と sanitize、Mermaid fence 検出、session revision 更新、HTTP session API を対象にする。
+Rust の test は Markdown render、安全な raw HTML の render と sanitize、Mermaid SVG 描画・エラー表示・fence 検出、session revision 更新、HTTP session API を対象にする。
 
 ## Neovim Plugin
 
@@ -23,7 +23,7 @@ Rust の test は Markdown render、安全な raw HTML の render と sanitize�
 4. Markdown buffer を開いて `:MdLiveStart` を実行する。
 5. browser が開き、初回 preview が表示されることを確認する。
 6. buffer を編集し、preview が更新されることを確認する。
-7. `mermaid` fenced block を追加し、その document だけで Mermaid が lazy load されることを確認する。
+7. `mermaid` fenced block を追加し、JavaScript を読み込まず図が表示されることを確認する。
 8. `:MdLiveExportHtml` を実行し、HTML file が書き出されることを確認する。
 9. Chrome/Chromium 互換の headless browser が入った環境で `:MdLiveExportPdf` を実行し、PDF file が書き出されることを確認する。
 10. `:MdLiveStop` を実行し、server process が終了することを確認する。

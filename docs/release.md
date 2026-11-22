@@ -45,6 +45,10 @@ Before making the repository public:
 
 - Verify the first public release on GitHub before announcing the prebuilt Lazy.nvim install path.
 
+## 0.2.1
+
+Security update for dependencies flagged by `cargo audit`: ammonia 4.2.5 (HTML/SVG/MathML sanitization XSS fixes), pulldown-cmark 0.13.6, anyhow 1.0.104, and tokio 1.54.1. No configuration changes.
+
 ## 0.2.0
 
 Mermaid rendering now uses merman 0.9.2. Update the plugin and server binary together. Lua `mermaid.mode` / `mermaid.cdn_url` are removed; `mermaid.enabled` remains. CLI modes are `merman` / `none`. Source builds require Rust 1.95 or later.

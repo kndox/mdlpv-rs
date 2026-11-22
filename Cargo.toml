@@ -1,6 +1,6 @@
 [package]
 name = "mdlpv-rs"
-version = "0.2.0"
+version = "0.2.1"
 edition = "2024"
 rust-version = "1.95"
 description = "Neovim Markdown live preview powered by a small Rust localhost server"
@@ -10,14 +10,14 @@ readme = "README.md"
 
 [dependencies]
 anyhow = "1"
-ammonia = "4.1.2"
+ammonia = "4.2.5"
 axum = "0.8"
 base64 = "0.22"
 clap = { version = "4", features = ["derive"] }
 cssparser = "0.35"
 futures-util = "0.3"
 merman = "0.9.2"
-pulldown-cmark = "0.13"
+pulldown-cmark = "0.13.6"
 roxmltree = "0.21"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"

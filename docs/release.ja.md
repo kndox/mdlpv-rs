@@ -45,6 +45,10 @@ repository を public にする前に以下を確認する。
 
 - 最初の public release を GitHub 上で確認してから、prebuilt Lazy.nvim install path を告知する。
 
+## 0.2.1
+
+`cargo audit` で検出された依存関係の脆弱性を修正。ammonia 4.2.5(HTML／SVG／MathML サニタイズの XSS 修正)、pulldown-cmark 0.13.6、anyhow 1.0.104、tokio 1.54.1 に更新しました。設定の変更はありません。
+
 ## 0.2.0
 
 Mermaid 描画を merman 0.9.2 に統一。プラグインとサーバーバイナリを同時に更新してください。Lua の `mermaid.mode`／`mermaid.cdn_url` は廃止し、`mermaid.enabled` を維持します。CLI の mode は `merman`／`none` です。ビルドには Rust 1.95 以上が必要です。

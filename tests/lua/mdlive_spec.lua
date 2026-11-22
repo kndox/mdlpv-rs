@@ -5,7 +5,10 @@ local calls = {}
 local killed_signal = nil
 local delay_session_delete = false
 local delayed_delete_exit = nil
+local delay_session_update = false
+local delayed_update_exits = {}
 local notifications = {}
+local slow_servers = {}
 
 vim.notify = function(message, level)
   table.insert(notifications, { message = message, level = level })
@@ -26,12 +29,38 @@ vim.system = function(args, opts, on_exit)
     }
   end
 
-  if args[1] == "mdlpv-rs" then
-    opts.stderr(nil, "server started\n")
+  if args[1] == "old-server" then
     opts.stdout(nil, '{"host":"127.0.0.1","port":34567}\n')
     return {
       kill = function(_, signal)
         killed_signal = signal
+      end,
+    }
+  end
+
+  if args[1] == "slow-server" then
+    -- Startup output is emitted later by the test, split across chunks.
+    table.insert(slow_servers, opts)
+    return {
+      kill = function(_, signal)
+        killed_signal = signal
+        vim.schedule(function()
+          on_exit({ code = 143, stdout = "", stderr = "" })
+        end)
+      end,
+    }
+  end
+
+  if args[1] == "mdlpv-rs" then
+    opts.stderr(nil, "server started\n")
+    opts.stdout(nil, '{"host":"127.0.0.1","port":34567,"token":"test-token"}\n')
+    return {
+      kill = function(_, signal)
+        killed_signal = signal
+        -- Like a real process, report the exit asynchronously after the kill.
+        vim.schedule(function()
+          on_exit({ code = 143, stdout = "", stderr = "" })
+        end)
       end,
     }
   end
@@ -59,6 +88,15 @@ vim.system = function(args, opts, on_exit)
       stdout = '{"ok":true,"revision":2}'
     elseif method == "GET" and url:match("/api/export/") then
       stdout = "<!doctype html>\n<title>export</title>\n"
+    end
+
+    if method == "POST" and delay_session_update and url:match("/api/session/.+$") and not url:match("/scroll$") then
+      table.insert(delayed_update_exits, function()
+        vim.schedule(function()
+          on_exit({ code = 0, stdout = stdout, stderr = "" })
+        end)
+      end)
+      return {}
     end
 
     if method == "DELETE" and delay_session_delete then
@@ -194,6 +232,22 @@ for _, call in ipairs(calls) do
 end
 assert_true(post_call ~= nil, "session POST was not sent")
 assert_true(post_call.opts.stdin:match('"content":"# Title\\n\\nbody"') ~= nil, "buffer payload was not encoded")
+local header_arg = nil
+for index, arg in ipairs(post_call.args) do
+  if arg == "--header" and post_call.args[index + 1]:sub(1, 1) == "@" then
+    header_arg = post_call.args[index + 1]
+  end
+end
+assert_true(header_arg ~= nil, "auth header file was not passed to curl")
+assert_true(not table.concat(post_call.args, " "):match("test%-token"), "token leaked into curl argv")
+local auth_header_path = header_arg:sub(2)
+assert_true(
+  vim.fn.readfile(auth_header_path)[1] == "Authorization: Bearer test-token",
+  "auth header file has wrong content"
+)
+if vim.fn.has("unix") == 1 then
+  assert_true(vim.fn.getfperm(auth_header_path) == "rw-------", "auth header file is not private")
+end
 
 local function count_session_updates()
   local count = 0
@@ -256,6 +310,19 @@ local function last_scroll_call()
   return result[#result]
 end
 
+local creates_before_duplicate_start = count_session_creates()
+local duplicate_starts = 0
+for _ = 1, 2 do
+  mdlive.start(bufnr, function(err)
+    assert_true(err == nil, "duplicate start failed: " .. tostring(err))
+    duplicate_starts = duplicate_starts + 1
+  end)
+end
+wait_for(function()
+  return duplicate_starts == 2
+end, "duplicate start callbacks did not run")
+assert_true(count_session_creates() == creates_before_duplicate_start, "start created a second session for one buffer")
+
 local update_count = count_session_updates()
 vim.api.nvim_buf_set_lines(bufnr, 1, -1, false, { "", "changed once" })
 vim.api.nvim_exec_autocmds("TextChanged", { buffer = bufnr })
@@ -264,6 +331,39 @@ vim.api.nvim_exec_autocmds("TextChanged", { buffer = bufnr })
 wait_for(function()
   return count_session_updates() == update_count + 1
 end, "debounced update POST was not sent once")
+
+local function last_update_call()
+  local result = nil
+  for _, call in ipairs(calls) do
+    if
+      call.args[1] == "curl"
+      and call.args[#call.args]:match("/api/session/.+$")
+      and not call.args[#call.args]:match("/scroll$")
+    then
+      result = call
+    end
+  end
+  return result
+end
+
+delay_session_update = true
+update_count = count_session_updates()
+for index = 1, 3 do
+  vim.api.nvim_buf_set_lines(bufnr, 1, -1, false, { "", "serialized " .. index })
+  mdlive.update(bufnr)
+end
+wait_for(function()
+  return #delayed_update_exits == 1
+end, "first serialized update was not sent")
+assert_true(count_session_updates() == update_count + 1, "updates were sent concurrently")
+delay_session_update = false
+table.remove(delayed_update_exits, 1)()
+wait_for(function()
+  return count_session_updates() == update_count + 2
+end, "pending update was not sent after the in-flight one finished")
+assert_true(last_update_call().opts.stdin:match("serialized 3") ~= nil, "follow-up update did not use the latest buffer")
+vim.wait(50)
+assert_true(count_session_updates() == update_count + 2, "coalesced updates were sent more than once")
 
 vim.api.nvim_win_set_cursor(0, { 3, 0 })
 mdlive.scroll(bufnr)
@@ -372,6 +472,7 @@ wait_for(function()
   return false
 end, "PDF browser was not launched")
 assert_true(vim.tbl_contains(pdf_call.args, "--headless"), "PDF browser was not headless")
+assert_true(not vim.tbl_contains(pdf_call.args, "--no-sandbox"), "PDF browser sandbox was disabled by default")
 assert_true(vim.tbl_contains(pdf_call.args, "--virtual-time-budget=1234"), "PDF virtual time budget was not set")
 assert_true(vim.tbl_contains(pdf_call.args, "--print-to-pdf=" .. pdf_path), "PDF output path was not passed")
 assert_true(pdf_call.args[#pdf_call.args]:match("/api/export/") ~= nil, "PDF export URL was not passed")
@@ -390,6 +491,12 @@ delayed_delete_exit()
 wait_for(function()
   return killed_signal == 15 and count_session_creates() == creates_before_restart + 1
 end, "restart did not start after stop completed")
+vim.wait(50)
+assert_true(
+  client.state.host ~= nil and client.state.process ~= nil,
+  "exit of the stopped server cleared the restarted server state"
+)
+assert_true(vim.fn.filereadable(auth_header_path) == 0, "stopped server auth header file was not removed")
 
 killed_signal = nil
 delay_session_delete = true
@@ -444,6 +551,74 @@ vim.wait(50)
 assert_true(count_session_deletes() == deletes_before_leave, "VimLeavePre waited on session DELETE before stopping")
 delay_session_delete = false
 
+-- A session left by a server that exited must not be reused for updates or exports.
+local stale_session_started = false
+config.options.server_bin = "mdlpv-rs"
+mdlive.start(bufnr, function(err)
+  assert_true(err == nil, "start before stale check failed: " .. tostring(err))
+  stale_session_started = true
+end)
+wait_for(function()
+  return stale_session_started
+end, "start before stale check did not complete")
+client.stop_server()
+local calls_before_stale_update = #calls
+mdlive.update(bufnr)
+vim.wait(20)
+assert_true(#calls == calls_before_stale_update, "update was sent for a session of an exited server")
+local creates_before_stale_export = count_session_creates()
+pcall(vim.fn.delete, export_path)
+vim.ui.input = function(_, cb)
+  cb(export_path)
+end
+mdlive.export_html(bufnr)
+wait_for(function()
+  return vim.fn.filereadable(export_path) == 1
+end, "export after server exit did not start a new session")
+assert_true(count_session_creates() == creates_before_stale_export + 1, "export reused a stale session")
+mdlive.stop(nil, { force = true })
+
+config.options.server_bin = "old-server"
+local old_server_error = nil
+mdlive.start(bufnr, function(err)
+  old_server_error = err
+end)
+wait_for(function()
+  return old_server_error ~= nil
+end, "server without a token did not fail startup")
+assert_true(old_server_error:match("update the mdlpv%-rs binary") ~= nil, "old server error was unclear")
+assert_true(client.state.starting == false and client.state.generation == nil, "old server left startup pending")
+
+config.options.server_bin = "slow-server"
+local interrupted_start_error = nil
+local creates_before_interrupted_start = count_session_creates()
+mdlive.start(bufnr, function(err)
+  interrupted_start_error = err
+end)
+assert_true(#slow_servers == 1, "slow server was not launched")
+local restart_done = false
+mdlive.stop(function()
+  mdlive.start(bufnr, function(err)
+    assert_true(err == nil, "start after interrupted start failed: " .. tostring(err))
+    restart_done = true
+  end)
+end)
+wait_for(function()
+  return interrupted_start_error ~= nil and #slow_servers == 2
+end, "stop did not abort the pending start or the new start did not launch a server")
+slow_servers[2].stdout(nil, '{"host":"127.0.0.1",')
+vim.wait(20)
+assert_true(not restart_done, "partial startup line was treated as complete")
+slow_servers[2].stdout(nil, '"port":34567,"token":"test-token"}\n')
+wait_for(function()
+  return restart_done
+end, "start after interrupted start did not complete")
+assert_true(
+  count_session_creates() == creates_before_interrupted_start + 1,
+  "interrupted start created an extra session"
+)
+mdlive.stop(nil, { force = true })
+
 config.options.server_bin = "fail-server"
 local failed_start = nil
 mdlive.start(bufnr, function(err)
@@ -492,7 +667,7 @@ install.detect_asset = function()
   return "mdlpv-rs-linux-x86_64.tar.gz", "linux"
 end
 vim.fn.executable = function(name)
-  if name == "curl" or name == "sha256sum" or name == "tar" then
+  if name == "curl" or name == "git" or name == "sha256sum" or name == "tar" then
     return 1
   end
   return original_executable(name)
@@ -541,6 +716,30 @@ vim.system = function(args)
   error("unexpected installer command: " .. table.concat(args, " "))
 end
 
+local install_urls = {}
+local stub_system = vim.system
+vim.system = function(args, ...)
+  if args[1] == "curl" and args[#args]:match("/download/v9%.9%.9/SHA256SUMS$") then
+    table.insert(install_urls, args[#args])
+    return {
+      wait = function()
+        return { code = 22, stdout = "", stderr = "404" }
+      end,
+    }
+  end
+  if args[1] == "git" then
+    return {
+      wait = function()
+        return { code = 0, stdout = "v9.9.9\n", stderr = "" }
+      end,
+    }
+  end
+  if args[1] == "curl" then
+    table.insert(install_urls, args[#args])
+  end
+  return stub_system(args, ...)
+end
+
 local install_ok, installed_binary = pcall(function()
   return install.install({ dir = install_plugin_dir })
 end)
@@ -554,5 +753,14 @@ assert_true(install_ok, installed_binary)
 assert_true(installed_binary == install_plugin_dir .. "/mdlpv-rs", "installer returned wrong binary path")
 assert_true(installed_binary_readable == 1, "installer did not copy binary")
 assert_true(installed_binary_content == "installed binary", "installer copied wrong binary content")
+assert_true(
+  install_urls[1] == "https://github.com/kndox/mdlpv-rs/releases/download/v9.9.9/mdlpv-rs-linux-x86_64.tar.gz",
+  "installer did not download the release matching the plugin tag: " .. tostring(install_urls[1])
+)
+assert_true(
+  install_urls[#install_urls]
+    == "https://github.com/kndox/mdlpv-rs/releases/latest/download/SHA256SUMS",
+  "installer did not fall back to the latest release when the tag had no assets"
+)
 
 vim.cmd("quitall!")

@@ -4,9 +4,9 @@ use crate::{
 };
 use axum::{
     Json, Router,
-    extract::{DefaultBodyLimit, Path, State},
-    http::{HeaderName, HeaderValue, StatusCode, header},
-    middleware,
+    extract::{DefaultBodyLimit, Path, Request, State},
+    http::{HeaderMap, HeaderName, HeaderValue, StatusCode, header},
+    middleware::{self, Next},
     response::{
         Html, IntoResponse, Response,
         sse::{Event, KeepAlive, Sse},
@@ -16,8 +16,11 @@ use axum::{
 use futures_util::StreamExt;
 use serde::Serialize;
 use std::{
+    borrow::Cow,
     convert::Infallible,
+    net::IpAddr,
     path::{Component, Path as FsPath, PathBuf},
+    sync::Arc,
 };
 use tokio_stream::wrappers::BroadcastStream;
 use uuid::Uuid;
@@ -25,7 +28,7 @@ use uuid::Uuid;
 const MAX_JSON_BODY_BYTES: usize = 8 * 1024 * 1024;
 const CONTENT_SECURITY_POLICY: &str = concat!(
     "default-src 'self'; ",
-    "script-src 'self' https: 'unsafe-inline'; ",
+    "script-src 'self'; ",
     "style-src 'self' 'unsafe-inline'; ",
     "img-src 'self' http: https: data:; ",
     "font-src 'self'; ",
@@ -34,28 +37,46 @@ const CONTENT_SECURITY_POLICY: &str = concat!(
     "base-uri 'self'; ",
     "frame-ancestors 'none'"
 );
+// Local images may be SVG documents; never let them run scripts if opened directly.
+const IMAGE_CONTENT_SECURITY_POLICY: &str =
+    "default-src 'none'; style-src 'unsafe-inline'; sandbox";
+const IMAGE_EXTENSIONS: [&str; 15] = [
+    "apng", "avif", "bmp", "gif", "ico", "jfif", "jpeg", "jpg", "pjp", "pjpeg", "png", "svg",
+    "tif", "tiff", "webp",
+];
 
 #[derive(Debug, Clone)]
 pub struct AppConfig {
     pub host: String,
     pub port: u16,
     pub mermaid_mode: MermaidMode,
+    /// Secret required by the session mutation API; printed only to the parent process.
+    pub token: String,
+}
+
+impl AppConfig {
+    fn origin(&self) -> String {
+        format!("http://{}:{}", url_host(&self.host), self.port)
+    }
 }
 
 #[derive(Debug, Clone)]
 pub struct AppState {
     pub config: AppConfig,
     pub sessions: SharedSessions,
-    render_slots: std::sync::Arc<tokio::sync::Semaphore>,
+    render_slots: Arc<tokio::sync::Semaphore>,
     assets_root: PathBuf,
+    /// `None` accepts any Host, for wildcard binds reached through arbitrary addresses.
+    allowed_hosts: Option<Arc<[String]>>,
 }
 
 impl AppState {
     pub fn new(config: AppConfig) -> Self {
         Self {
+            allowed_hosts: allowed_hosts(&config.host, config.port),
             config,
             sessions: new_store(),
-            render_slots: std::sync::Arc::new(tokio::sync::Semaphore::new(2)),
+            render_slots: Arc::new(tokio::sync::Semaphore::new(2)),
             assets_root: select_assets_root(
                 std::env::current_exe().ok().as_deref(),
                 FsPath::new(env!("CARGO_MANIFEST_DIR")),
@@ -65,14 +86,18 @@ impl AppState {
 }
 
 pub fn app(state: AppState) -> Router {
-    Router::new()
-        .route("/health", get(health))
+    let session_api = Router::new()
         .route("/api/session", post(create_session))
         .route(
             "/api/session/{session_id}",
             post(update_session).delete(delete_session),
         )
         .route("/api/session/{session_id}/scroll", post(scroll_session))
+        .route_layer(middleware::from_fn_with_state(state.clone(), require_token));
+
+    Router::new()
+        .route("/health", get(health))
+        .merge(session_api)
         .route("/api/rendered/{session_id}", get(rendered_session))
         .route("/api/export/{session_id}", get(export_session))
         .route("/api/image/{session_id}/{*path}", get(session_image))
@@ -80,18 +105,102 @@ pub fn app(state: AppState) -> Router {
         .route("/view/{session_id}", get(view_session))
         .route("/assets/viewer.js", get(viewer_js))
         .route("/assets/style.css", get(style_css))
+        .route("/assets/export.js", get(export_js))
         .route("/assets/katex/{*path}", get(katex_asset))
         .layer(DefaultBodyLimit::max(MAX_JSON_BODY_BYTES))
+        .layer(middleware::from_fn_with_state(state.clone(), check_host))
         .layer(middleware::map_response(add_security_headers))
         .with_state(state)
 }
 
+/// Ends every viewer stream so graceful shutdown does not wait on open SSE connections.
+pub async fn close_all_sessions(state: &AppState) {
+    for (_, session) in state.sessions.write().await.drain() {
+        session.close();
+    }
+}
+
+fn url_host(host: &str) -> Cow<'_, str> {
+    if host.contains(':') && !host.starts_with('[') {
+        Cow::Owned(format!("[{host}]"))
+    } else {
+        Cow::Borrowed(host)
+    }
+}
+
+fn allowed_hosts(host: &str, port: u16) -> Option<Arc<[String]>> {
+    let ip = host
+        .trim_start_matches('[')
+        .trim_end_matches(']')
+        .parse::<IpAddr>()
+        .ok();
+    if ip.is_some_and(|ip| ip.is_unspecified()) {
+        return None;
+    }
+    let mut names = vec![url_host(host).to_ascii_lowercase()];
+    if host.eq_ignore_ascii_case("localhost") || ip.is_some_and(|ip| ip.is_loopback()) {
+        names.extend(["localhost", "127.0.0.1", "[::1]"].map(String::from));
+    }
+    let mut hosts: Vec<String> = names.iter().map(|name| format!("{name}:{port}")).collect();
+    // Browsers omit the default port from the Host header.
+    if port == 80 {
+        hosts.extend(names);
+    }
+    Some(hosts.into())
+}
+
+// Rejecting unexpected Host headers blocks DNS rebinding from web pages.
+async fn check_host(
+    State(state): State<AppState>,
+    request: Request,
+    next: Next,
+) -> Result<Response, ApiError> {
+    if let Some(allowed) = &state.allowed_hosts {
+        let host = request
+            .headers()
+            .get(header::HOST)
+            .and_then(|value| value.to_str().ok())
+            .map(str::to_ascii_lowercase);
+        if !host.is_some_and(|host| allowed.contains(&host)) {
+            return Err(ApiError::BadHost);
+        }
+    }
+    Ok(next.run(request).await)
+}
+
+async fn require_token(
+    State(state): State<AppState>,
+    request: Request,
+    next: Next,
+) -> Result<Response, ApiError> {
+    if !has_valid_token(request.headers(), &state.config.token) {
+        return Err(ApiError::Unauthorized);
+    }
+    Ok(next.run(request).await)
+}
+
+fn has_valid_token(headers: &HeaderMap, token: &str) -> bool {
+    let Some(provided) = headers
+        .get(header::AUTHORIZATION)
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.strip_prefix("Bearer "))
+    else {
+        return false;
+    };
+    // Constant-time comparison over equal-length inputs.
+    provided.len() == token.len()
+        && provided
+            .bytes()
+            .zip(token.bytes())
+            .fold(0, |diff, (a, b)| diff | (a ^ b))
+            == 0
+}
+
 async fn add_security_headers(mut response: Response) -> Response {
     let headers = response.headers_mut();
-    headers.insert(
-        header::CONTENT_SECURITY_POLICY,
-        HeaderValue::from_static(CONTENT_SECURITY_POLICY),
-    );
+    headers
+        .entry(header::CONTENT_SECURITY_POLICY)
+        .or_insert(HeaderValue::from_static(CONTENT_SECURITY_POLICY));
     headers.insert(
         HeaderName::from_static("referrer-policy"),
         HeaderValue::from_static("no-referrer"),
@@ -135,10 +244,7 @@ async fn create_session(
     let enabled = matches!(state.config.mermaid_mode, MermaidMode::Merman);
     let session = run_render_job(&state, move || Session::new(input, enabled)).await?;
     let id = session.id;
-    let view_url = format!(
-        "http://{}:{}/view/{}",
-        state.config.host, state.config.port, id
-    );
+    let view_url = format!("{}/view/{id}", state.config.origin());
 
     state.sessions.write().await.insert(id, session);
 
@@ -243,10 +349,19 @@ async fn session_image(
     let session = sessions.get(&session_id).ok_or(ApiError::SessionNotFound)?;
     let image_path = resolve_session_file(&session.path, &path)?;
     drop(sessions);
+    if !is_image_path(&image_path) {
+        return Err(ApiError::Forbidden);
+    }
 
     match tokio::fs::read(&image_path).await {
         Ok(bytes) => Ok((
-            [(header::CONTENT_TYPE, content_type_for_path(&image_path))],
+            [
+                (header::CONTENT_TYPE, content_type_for_path(&image_path)),
+                (
+                    header::CONTENT_SECURITY_POLICY,
+                    IMAGE_CONTENT_SECURITY_POLICY,
+                ),
+            ],
             bytes,
         )
             .into_response()),
@@ -299,7 +414,7 @@ async fn view_session(
     }
     drop(sessions);
 
-    Ok(Html(viewer_html(session_id)?))
+    Ok(Html(viewer_html(session_id)))
 }
 
 async fn viewer_js() -> impl IntoResponse {
@@ -313,6 +428,13 @@ async fn style_css() -> impl IntoResponse {
     (
         [(header::CONTENT_TYPE, "text/css; charset=utf-8")],
         include_str!("../assets/style.css"),
+    )
+}
+
+async fn export_js() -> impl IntoResponse {
+    (
+        [(header::CONTENT_TYPE, "text/javascript; charset=utf-8")],
+        include_str!("../assets/export.js"),
     )
 }
 
@@ -333,15 +455,13 @@ async fn katex_asset(
     }
 }
 
-fn viewer_html(session_id: Uuid) -> Result<String, ApiError> {
-    let config_json =
-        serde_json::to_string(&ViewerConfig { session_id }).map_err(ApiError::Serialize)?;
-
-    Ok(include_str!("../assets/viewer.html").replace("__MDLIVE_CONFIG__", &config_json))
+fn viewer_html(session_id: Uuid) -> String {
+    // A data attribute keeps the viewer free of inline scripts under the CSP.
+    include_str!("../assets/viewer.html").replace("__MDLIVE_SESSION_ID__", &session_id.to_string())
 }
 
 fn export_html(config: &AppConfig, session: &Session) -> String {
-    let origin = format!("http://{}:{}", config.host, config.port);
+    let origin = config.origin();
     let mut head = format!(
         r#"<base href="{origin}/">
 <style>
@@ -356,23 +476,8 @@ fn export_html(config: &AppConfig, session: &Session) -> String {
         head.push('\n');
         head.push_str(r#"<script defer src="/assets/katex/katex.min.js"></script>"#);
         head.push('\n');
-    }
-    let mut scripts = String::new();
-    if session.rendered.has_math {
-        scripts.push_str(
-            r#"<script>
-window.addEventListener("DOMContentLoaded", () => {
-  if (!window.katex) return;
-  document.querySelectorAll(".math").forEach((node) => {
-    katex.render(node.textContent, node, {
-      displayMode: node.classList.contains("math-display"),
-      throwOnError: false,
-    });
-  });
-});
-</script>
-"#,
-        );
+        head.push_str(r#"<script defer src="/assets/export.js"></script>"#);
+        head.push('\n');
     }
     format!(
         r#"<!doctype html>
@@ -387,24 +492,22 @@ window.addEventListener("DOMContentLoaded", () => {
   <main class="markdown-body">
 {}
   </main>
-{}
 </body>
 </html>
 "#,
         escape_html_text(&session.title),
         head,
         session.rendered.html,
-        scripts
     )
 }
 
-fn resolve_session_file(markdown_path: &str, encoded_path: &str) -> Result<PathBuf, ApiError> {
+fn resolve_session_file(markdown_path: &str, path: &str) -> Result<PathBuf, ApiError> {
     let base = FsPath::new(markdown_path)
         .parent()
         .unwrap_or_else(|| FsPath::new("."))
         .canonicalize()
         .map_err(ApiError::Io)?;
-    resolve_file_under_base(base, encoded_path)
+    resolve_file_under_base(base, path)
 }
 
 fn select_assets_root(executable: Option<&FsPath>, manifest_dir: &FsPath) -> PathBuf {
@@ -421,18 +524,19 @@ fn select_assets_root(executable: Option<&FsPath>, manifest_dir: &FsPath) -> Pat
 fn resolve_asset_file(
     assets_root: &FsPath,
     asset_dir: &str,
-    encoded_path: &str,
+    path: &str,
 ) -> Result<PathBuf, ApiError> {
     let base = assets_root
         .join(asset_dir)
         .canonicalize()
         .map_err(ApiError::Io)?;
-    resolve_file_under_base(base, encoded_path)
+    resolve_file_under_base(base, path)
 }
 
-fn resolve_file_under_base(base: PathBuf, encoded_path: &str) -> Result<PathBuf, ApiError> {
-    let relative_path = percent_decode_path(encoded_path)?;
-    let relative_path = safe_relative_path(&relative_path)?;
+// `path` is already percent-decoded by the router; decoding again would alter
+// file names that contain `%`.
+fn resolve_file_under_base(base: PathBuf, path: &str) -> Result<PathBuf, ApiError> {
+    let relative_path = safe_relative_path(path)?;
     let target = canonicalize_existing(base.join(relative_path))?;
 
     if !target.starts_with(base) {
@@ -473,40 +577,31 @@ fn canonicalize_existing(path: PathBuf) -> Result<PathBuf, ApiError> {
     })
 }
 
-fn percent_decode_path(path: &str) -> Result<String, ApiError> {
-    let mut decoded = Vec::with_capacity(path.len());
-    let bytes = path.as_bytes();
-    let mut index = 0;
-
-    while index < bytes.len() {
-        if bytes[index] == b'%' {
-            if index + 2 >= bytes.len() {
-                return Err(ApiError::BadPath);
-            }
-            let hex =
-                std::str::from_utf8(&bytes[index + 1..index + 3]).map_err(|_| ApiError::BadPath)?;
-            let byte = u8::from_str_radix(hex, 16).map_err(|_| ApiError::BadPath)?;
-            decoded.push(byte);
-            index += 3;
-        } else {
-            decoded.push(bytes[index]);
-            index += 1;
-        }
-    }
-
-    String::from_utf8(decoded).map_err(|_| ApiError::BadPath)
+fn is_image_path(path: &FsPath) -> bool {
+    path.extension()
+        .and_then(|ext| ext.to_str())
+        .is_some_and(|ext| IMAGE_EXTENSIONS.contains(&ext.to_ascii_lowercase().as_str()))
 }
 
 fn content_type_for_path(path: &FsPath) -> &'static str {
-    match path.extension().and_then(|ext| ext.to_str()).unwrap_or("") {
+    let extension = path
+        .extension()
+        .and_then(|ext| ext.to_str())
+        .unwrap_or("")
+        .to_ascii_lowercase();
+    match extension.as_str() {
+        "apng" => "image/apng",
         "avif" => "image/avif",
+        "bmp" => "image/bmp",
         "css" => "text/css; charset=utf-8",
         "gif" => "image/gif",
-        "jpeg" | "jpg" => "image/jpeg",
+        "ico" => "image/x-icon",
+        "jfif" | "jpeg" | "jpg" | "pjp" | "pjpeg" => "image/jpeg",
         "js" => "text/javascript; charset=utf-8",
         "otf" => "font/otf",
         "png" => "image/png",
         "svg" => "image/svg+xml",
+        "tif" | "tiff" => "image/tiff",
         "ttf" => "font/ttf",
         "webp" => "image/webp",
         "woff" => "font/woff",
@@ -561,12 +656,6 @@ struct RenderedSessionResponse {
     has_math: bool,
 }
 
-#[derive(Debug, Serialize)]
-#[serde(rename_all = "camelCase")]
-struct ViewerConfig {
-    session_id: Uuid,
-}
-
 #[derive(Debug, thiserror::Error)]
 enum ApiError {
     #[error("rendering task failed: {0}")]
@@ -577,12 +666,12 @@ enum ApiError {
     FileNotFound,
     #[error("forbidden path")]
     Forbidden,
-    #[error("bad path")]
-    BadPath,
+    #[error("unauthorized")]
+    Unauthorized,
+    #[error("unexpected host")]
+    BadHost,
     #[error("io error: {0}")]
     Io(std::io::Error),
-    #[error("failed to serialize response: {0}")]
-    Serialize(serde_json::Error),
 }
 
 impl IntoResponse for ApiError {
@@ -591,9 +680,9 @@ impl IntoResponse for ApiError {
             ApiError::SessionNotFound => StatusCode::NOT_FOUND,
             ApiError::FileNotFound => StatusCode::NOT_FOUND,
             ApiError::Forbidden => StatusCode::FORBIDDEN,
-            ApiError::BadPath => StatusCode::BAD_REQUEST,
-            ApiError::Io(_) => StatusCode::INTERNAL_SERVER_ERROR,
-            ApiError::Serialize(_) | ApiError::RenderTask(_) => StatusCode::INTERNAL_SERVER_ERROR,
+            ApiError::Unauthorized => StatusCode::UNAUTHORIZED,
+            ApiError::BadHost => StatusCode::FORBIDDEN,
+            ApiError::Io(_) | ApiError::RenderTask(_) => StatusCode::INTERNAL_SERVER_ERROR,
         };
 
         (status, self.to_string()).into_response()
@@ -611,12 +700,20 @@ mod tests {
     use std::{fs, path::PathBuf};
     use tower::ServiceExt;
 
-    fn test_state() -> AppState {
-        AppState::new(AppConfig {
-            host: "127.0.0.1".to_string(),
+    const TEST_HOST: &str = "127.0.0.1:12345";
+    const TEST_TOKEN: &str = "test-token";
+
+    fn test_config(host: &str) -> AppConfig {
+        AppConfig {
+            host: host.to_string(),
             port: 12345,
             mermaid_mode: MermaidMode::Merman,
-        })
+            token: TEST_TOKEN.to_string(),
+        }
+    }
+
+    fn test_state() -> AppState {
+        AppState::new(test_config("127.0.0.1"))
     }
 
     fn test_app() -> Router {
@@ -627,7 +724,7 @@ mod tests {
     async fn health_returns_ok() {
         let response = test_app()
             .oneshot(
-                Request::builder()
+                request_builder()
                     .uri("/health")
                     .body(Body::empty())
                     .unwrap(),
@@ -642,7 +739,7 @@ mod tests {
     async fn responses_include_browser_security_headers() {
         let response = test_app()
             .oneshot(
-                Request::builder()
+                request_builder()
                     .uri("/health")
                     .body(Body::empty())
                     .unwrap(),
@@ -719,7 +816,7 @@ mod tests {
         let rendered_response = app
             .clone()
             .oneshot(
-                Request::builder()
+                request_builder()
                     .uri(format!("/api/rendered/{session_id}"))
                     .body(Body::empty())
                     .unwrap(),
@@ -926,7 +1023,7 @@ mod tests {
 
         let response = app
             .oneshot(
-                Request::builder()
+                request_builder()
                     .uri(format!("/api/export/{session_id}"))
                     .body(Body::empty())
                     .unwrap(),
@@ -945,11 +1042,7 @@ mod tests {
 
     #[tokio::test]
     async fn delete_removes_session_from_api_surface() {
-        let state = AppState::new(AppConfig {
-            host: "127.0.0.1".to_string(),
-            port: 12345,
-            mermaid_mode: MermaidMode::Merman,
-        });
+        let state = test_state();
         let app = app(state.clone());
         let create_response = app
             .clone()
@@ -975,9 +1068,10 @@ mod tests {
         let delete_response = app
             .clone()
             .oneshot(
-                Request::builder()
+                request_builder()
                     .method(Method::DELETE)
                     .uri(format!("/api/session/{session_id}"))
+                    .header(header::AUTHORIZATION, format!("Bearer {TEST_TOKEN}"))
                     .body(Body::empty())
                     .unwrap(),
             )
@@ -996,7 +1090,7 @@ mod tests {
         ] {
             let response = app
                 .clone()
-                .oneshot(Request::builder().uri(uri).body(Body::empty()).unwrap())
+                .oneshot(request_builder().uri(uri).body(Body::empty()).unwrap())
                 .await
                 .unwrap();
             assert_eq!(response.status(), StatusCode::NOT_FOUND);
@@ -1007,7 +1101,7 @@ mod tests {
     async fn serves_katex_asset_with_content_type() {
         let response = test_app()
             .oneshot(
-                Request::builder()
+                request_builder()
                     .uri("/assets/katex/katex.min.css")
                     .body(Body::empty())
                     .unwrap(),
@@ -1090,7 +1184,7 @@ mod tests {
             let response = app
                 .clone()
                 .oneshot(
-                    Request::builder()
+                    request_builder()
                         .uri(format!("/assets/{path}"))
                         .body(Body::empty())
                         .unwrap(),
@@ -1114,7 +1208,7 @@ mod tests {
             let response = app
                 .clone()
                 .oneshot(
-                    Request::builder()
+                    request_builder()
                         .uri(format!("/assets/{path}"))
                         .body(Body::empty())
                         .unwrap(),
@@ -1149,7 +1243,7 @@ mod tests {
             resolve_asset_file(
                 &FsPath::new(env!("CARGO_MANIFEST_DIR")).join("assets"),
                 "katex",
-                "%2E%2E/mermaid/mermaid.min.js"
+                "../mermaid/mermaid.min.js"
             ),
             Err(ApiError::Forbidden)
         ));
@@ -1180,7 +1274,7 @@ mod tests {
 
         let response = app
             .oneshot(
-                Request::builder()
+                request_builder()
                     .uri(format!("/api/image/{session_id}/images/a.png"))
                     .body(Body::empty())
                     .unwrap(),
@@ -1219,7 +1313,7 @@ mod tests {
 
         let response = app
             .oneshot(
-                Request::builder()
+                request_builder()
                     .uri(format!("/api/image/{session_id}/%2E%2E/secret.png"))
                     .body(Body::empty())
                     .unwrap(),
@@ -1234,7 +1328,7 @@ mod tests {
     async fn unknown_session_returns_404() {
         let response = test_app()
             .oneshot(
-                Request::builder()
+                request_builder()
                     .uri(format!("/api/rendered/{}", Uuid::new_v4()))
                     .body(Body::empty())
                     .unwrap(),
@@ -1245,11 +1339,273 @@ mod tests {
         assert_eq!(response.status(), StatusCode::NOT_FOUND);
     }
 
+    async fn create_test_session(app: &Router, path: &str, content: &str) -> String {
+        let response = app
+            .clone()
+            .oneshot(json_request(
+                Method::POST,
+                "/api/session",
+                json!({ "path": path, "title": "a.md", "content": content }),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        response_json(response).await["session_id"]
+            .as_str()
+            .unwrap()
+            .to_string()
+    }
+
+    #[tokio::test]
+    async fn session_api_requires_token() {
+        let app = test_app();
+        let session_id = create_test_session(&app, "/tmp/a.md", "# A").await;
+        let body = json!({ "path": "/tmp/a.md", "title": "a.md", "content": "# B" }).to_string();
+        for (method, uri, authorization) in [
+            (Method::POST, "/api/session".to_string(), None),
+            (
+                Method::POST,
+                "/api/session".to_string(),
+                Some("Bearer wrong-token"),
+            ),
+            (Method::POST, "/api/session".to_string(), Some(TEST_TOKEN)),
+            (Method::POST, format!("/api/session/{session_id}"), None),
+            (
+                Method::POST,
+                format!("/api/session/{session_id}/scroll"),
+                None,
+            ),
+            (Method::DELETE, format!("/api/session/{session_id}"), None),
+        ] {
+            let mut request = Request::builder()
+                .method(method)
+                .uri(&uri)
+                .header(header::HOST, TEST_HOST)
+                .header(header::CONTENT_TYPE, "application/json");
+            if let Some(authorization) = authorization {
+                request = request.header(header::AUTHORIZATION, authorization);
+            }
+            let response = app
+                .clone()
+                .oneshot(request.body(Body::from(body.clone())).unwrap())
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::UNAUTHORIZED, "{uri}");
+        }
+        let rendered = response_json(
+            app.oneshot(get_request(&format!("/api/rendered/{session_id}")))
+                .await
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(rendered["revision"], 1);
+    }
+
+    #[tokio::test]
+    async fn rejects_unexpected_host_headers() {
+        for host in [None, Some("evil.example:12345"), Some("127.0.0.1:1")] {
+            let mut request = Request::builder().uri("/health");
+            if let Some(host) = host {
+                request = request.header(header::HOST, host);
+            }
+            let response = test_app()
+                .oneshot(request.body(Body::empty()).unwrap())
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::FORBIDDEN, "{host:?}");
+            assert!(
+                response
+                    .headers()
+                    .contains_key(header::CONTENT_SECURITY_POLICY)
+            );
+        }
+        for host in ["127.0.0.1:12345", "LOCALHOST:12345", "[::1]:12345"] {
+            let response = test_app()
+                .oneshot(
+                    Request::builder()
+                        .uri("/health")
+                        .header(header::HOST, host)
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::OK, "{host}");
+        }
+    }
+
+    #[test]
+    fn host_allowlist_follows_bind_address() {
+        assert!(allowed_hosts("0.0.0.0", 1).is_none());
+        assert!(allowed_hosts("::", 1).is_none());
+        assert_eq!(
+            allowed_hosts("192.168.1.2", 1).unwrap().as_ref(),
+            ["192.168.1.2:1".to_string()]
+        );
+        let default_port = allowed_hosts("127.0.0.1", 80).unwrap();
+        assert!(default_port.contains(&"localhost".to_string()));
+        assert!(default_port.contains(&"127.0.0.1:80".to_string()));
+        assert!(
+            allowed_hosts("::1", 1)
+                .unwrap()
+                .contains(&"[::1]:1".to_string())
+        );
+    }
+
+    #[tokio::test]
+    async fn view_url_brackets_ipv6_hosts() {
+        let state = AppState::new(test_config("::1"));
+        let input = SessionInput {
+            path: "/tmp/a.md".into(),
+            title: "a.md".into(),
+            content: "# A".into(),
+        };
+        let Json(created) = create_session(State(state), Json(input)).await.unwrap();
+        assert!(created.view_url.starts_with("http://[::1]:12345/view/"));
+    }
+
+    #[tokio::test]
+    async fn viewer_has_no_inline_script() {
+        let app = test_app();
+        let session_id = create_test_session(&app, "/tmp/a.md", "# A").await;
+        let html = response_text(
+            app.oneshot(get_request(&format!("/view/{session_id}")))
+                .await
+                .unwrap(),
+        )
+        .await;
+        assert!(html.contains(&format!(r#"data-session-id="{session_id}""#)));
+        assert_eq!(html.matches("<script").count(), 1);
+        assert!(html.contains(r#"<script src="/assets/viewer.js"></script>"#));
+        assert!(
+            CONTENT_SECURITY_POLICY
+                .split("; ")
+                .any(|directive| directive == "script-src 'self'")
+        );
+    }
+
+    #[tokio::test]
+    async fn export_loads_math_renderer_from_asset() {
+        let app = test_app();
+        let session_id = create_test_session(&app, "/tmp/a.md", "$1+1$").await;
+        let html = response_text(
+            app.clone()
+                .oneshot(get_request(&format!("/api/export/{session_id}")))
+                .await
+                .unwrap(),
+        )
+        .await;
+        assert!(html.contains(r#"<script defer src="/assets/export.js"></script>"#));
+        assert!(!html.contains("<script>"));
+        let response = app.oneshot(get_request("/assets/export.js")).await.unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn close_all_sessions_ends_viewer_streams() {
+        let state = test_state();
+        let input = SessionInput {
+            path: "/tmp/a.md".into(),
+            title: "a.md".into(),
+            content: "# A".into(),
+        };
+        let Json(created) = create_session(State(state.clone()), Json(input))
+            .await
+            .unwrap();
+        let mut receiver = state.sessions.read().await[&created.session_id]
+            .updates
+            .subscribe();
+        close_all_sessions(&state).await;
+        assert!(state.sessions.read().await.is_empty());
+        assert!(matches!(receiver.recv().await, Ok(SessionEvent::Close(_))));
+        assert!(receiver.recv().await.is_err(), "channel must be closed");
+    }
+
+    #[tokio::test]
+    async fn session_images_reject_non_image_files_and_keep_percent_names() {
+        let dir = temp_dir();
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(dir.join("secret.txt"), b"secret").unwrap();
+        fs::write(dir.join("100%.PNG"), b"png").unwrap();
+        fs::write(dir.join("scan.tiff"), b"tiff").unwrap();
+        fs::write(dir.join("a.svg"), b"<svg/>").unwrap();
+        let app = test_app();
+        let session_id =
+            create_test_session(&app, &dir.join("a.md").to_string_lossy(), "# A").await;
+
+        let response = app
+            .clone()
+            .oneshot(get_request(&format!("/api/image/{session_id}/secret.txt")))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
+
+        let response = app
+            .clone()
+            .oneshot(get_request(&format!("/api/image/{session_id}/100%25.PNG")))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(
+            response.headers().get(header::CONTENT_TYPE).unwrap(),
+            "image/png"
+        );
+
+        let response = app
+            .clone()
+            .oneshot(get_request(&format!("/api/image/{session_id}/scan.tiff")))
+            .await
+            .unwrap();
+        assert_eq!(
+            response.headers().get(header::CONTENT_TYPE).unwrap(),
+            "image/tiff"
+        );
+
+        let response = app
+            .oneshot(get_request(&format!("/api/image/{session_id}/a.svg")))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(
+            response
+                .headers()
+                .get(header::CONTENT_SECURITY_POLICY)
+                .unwrap(),
+            IMAGE_CONTENT_SECURITY_POLICY
+        );
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn token_comparison_requires_exact_bearer_value() {
+        let mut headers = HeaderMap::new();
+        assert!(!has_valid_token(&headers, "abc"));
+        for (value, expected) in [
+            ("Bearer abc", true),
+            ("Bearer abd", false),
+            ("Bearer ab", false),
+            ("bearer abc", false),
+            ("abc", false),
+        ] {
+            headers.insert(header::AUTHORIZATION, HeaderValue::from_static(value));
+            assert_eq!(has_valid_token(&headers, "abc"), expected, "{value}");
+        }
+    }
+
+    fn request_builder() -> axum::http::request::Builder {
+        Request::builder().header(header::HOST, TEST_HOST)
+    }
+
+    fn get_request(uri: &str) -> Request<Body> {
+        request_builder().uri(uri).body(Body::empty()).unwrap()
+    }
+
     fn json_request(method: Method, uri: &str, body: Value) -> Request<Body> {
-        Request::builder()
+        request_builder()
             .method(method)
             .uri(uri)
             .header(header::CONTENT_TYPE, "application/json")
+            .header(header::AUTHORIZATION, format!("Bearer {TEST_TOKEN}"))
             .body(Body::from(body.to_string()))
             .unwrap()
     }

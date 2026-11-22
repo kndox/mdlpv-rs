@@ -8,7 +8,7 @@ The Neovim plugin sends the current Markdown buffer to the Rust server, the serv
 
 ## Requirements
 
-- Rust toolchain 1.95+
+- Latest stable Rust toolchain
 - Neovim with `vim.system()` support
 - `curl`
 - A desktop browser opener such as `xdg-open`, `open`, or Windows `start`
@@ -91,7 +91,7 @@ For a GitHub install with Lazy.nvim, use:
 }
 ```
 
-This downloads the matching prebuilt `mdlpv-rs` binary from the latest GitHub Release and verifies it with `SHA256SUMS`. It requires `curl` plus a SHA-256 tool (`sha256sum`, `shasum`, or PowerShell). Use the local checkout example above if you want Lazy.nvim to build the server from source with a Rust toolchain.
+This downloads the matching prebuilt `mdlpv-rs` binary and verifies it with `SHA256SUMS`. When the plugin checkout is at a release tag (for example with Lazy.nvim `version` or `tag`), the binary from that release is used; otherwise the latest release is used. `SHA256SUMS` detects corrupted downloads but comes from the same release; to verify provenance, run `gh attestation verify <archive> --repo kndox/mdlpv-rs`. It requires `curl` plus a SHA-256 tool (`sha256sum`, `shasum`, or PowerShell). Use the local checkout example above if you want Lazy.nvim to build the server from source with a Rust toolchain.
 
 ## Neovim Setup
 
@@ -126,13 +126,23 @@ Commands:
 - `:MdLiveExportHtml`
 - `:MdLiveExportPdf`
 
-On normal Neovim exit, `VimLeavePre` sends SIGTERM to the server process. If Neovim is killed forcibly, cleanup cannot run and the server process may remain.
+PDF export keeps the headless browser sandbox enabled. If your environment requires it (for example running as root in a container), add `"--no-sandbox"` to `pdf_extra_args`.
+
+On normal Neovim exit, `VimLeavePre` sends SIGTERM to the server process, which closes open viewers and shuts down. If Neovim is killed forcibly, cleanup cannot run and the server process may remain.
 
 ## Mermaid
 
-Mermaid fenced code blocks render on the server with merman 0.9.2 as embedded SVG images. They need no Mermaid JavaScript or CDN connection, and the same images are included in HTML/PDF exports.
+Mermaid fenced code blocks render on the server with merman 0.11.0 as embedded SVG images. They need no Mermaid JavaScript or CDN connection, and the same images are included in HTML/PDF exports.
 
 Malformed diagrams and resource limit failures show their source and an error in that block. Each diagram uses merman's default resource limits and a five-second cooperative deadline. HTML labels are converted to SVG text; interactive links and JavaScript actions within diagrams are unavailable. Rendering is not guaranteed to match Mermaid.js exactly.
+
+Math inside Mermaid labels (`$$...$$`) is not supported: merman's optional RaTeX math renderer is disabled because it depends on the unmaintained `ttf-parser` crate. Such diagrams show their source and an error. Math in the Markdown body is unaffected and still renders with KaTeX in the browser. See [Upstream Tracking](docs/release.md#upstream-tracking) for the status of re-enabling it.
+
+### Migrating to 0.3.0
+
+- Update the plugin and server binary together. The server now requires a per-launch token for session API calls, so older plugin versions cannot drive a 0.3.0 server.
+- PDF export no longer passes `--no-sandbox` by default. Add it to `pdf_extra_args` if your environment needs it.
+- Mermaid now renders with merman 0.11.0. Math inside Mermaid labels (`$$...$$`) is no longer supported; Markdown body math is unchanged.
 
 ### Migrating to 0.2.0
 

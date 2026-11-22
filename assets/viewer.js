@@ -1,7 +1,7 @@
 (function () {
   const content = document.getElementById("content");
   const status = document.getElementById("status");
-  const config = window.MDLIVE_CONFIG;
+  const sessionId = document.body.dataset.sessionId;
   let currentRevision = -1;
   let katexLoaded = false;
   let lastScrollLine = null;
@@ -11,7 +11,7 @@
   let eventSource = null;
 
   async function refresh() {
-    const res = await fetch(`/api/rendered/${config.sessionId}`);
+    const res = await fetch(`/api/rendered/${sessionId}`);
     if (!res.ok) {
       throw new Error(`fetch failed: ${res.status}`);
     }
@@ -33,7 +33,7 @@
   }
 
   function connectSse() {
-    eventSource = new EventSource(`/events/${config.sessionId}`);
+    eventSource = new EventSource(`/events/${sessionId}`);
     eventSource.addEventListener("update", () => refresh().catch(showError));
     eventSource.addEventListener("scroll", (event) => {
       try {
@@ -47,6 +47,14 @@
       }
     });
     eventSource.addEventListener("close", closeViewer);
+    // Updates sent while disconnected are not replayed; fetch the latest state.
+    // The first connection is covered by the initial refresh.
+    eventSource.onopen = () => {
+      if (currentRevision >= 0) {
+        status.textContent = `revision ${currentRevision}`;
+        refresh().catch(showError);
+      }
+    };
     eventSource.onerror = () => {
       status.textContent = "reconnecting...";
     };
@@ -112,21 +120,20 @@
     }
   }
 
+  // Do not trust `window.katex` before loading: preview HTML may define an
+  // element with id="katex", which the browser exposes as that global.
   async function ensureKatex() {
-    if (katexLoaded || window.katex) {
+    if (!katexLoaded) {
+      await loadStylesheet("/assets/katex/katex.min.css");
+      await loadScript("/assets/katex/katex.min.js");
       katexLoaded = true;
-      return window.katex;
     }
 
-    await loadStylesheet("/assets/katex/katex.min.css");
-    await loadScript("/assets/katex/katex.min.js");
-
-    if (!window.katex) {
+    const katex = window.katex;
+    if (typeof katex?.render !== "function") {
       throw new Error("KaTeX failed to load");
     }
-
-    katexLoaded = true;
-    return window.katex;
+    return katex;
   }
 
   function loadScript(src) {

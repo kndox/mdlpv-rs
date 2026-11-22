@@ -47,8 +47,10 @@ Server defaults:
 server は bind 後に stdout へ startup JSON を 1 行出す。
 
 ```json
-{"host":"127.0.0.1","port":53123}
+{"host":"127.0.0.1","port":53123,"token":"<random>"}
 ```
+
+`token` は server 起動ごとに生成する。session を変更する route（`/api/session` 配下の `POST`／`DELETE`）は `Authorization: Bearer <token>` を必須とする。Lua plugin は header を private な一時 file に保存して curl に `--header @file` で渡すため、token は process 引数に現れない。
 
 log は stderr に出す。
 
@@ -65,8 +67,11 @@ Neovim plugin と viewer は以下の server routes を使う。
 - `GET /api/export/{session_id}`
 - `GET /events/{session_id}`
 - `GET /view/{session_id}`
+- `GET /api/image/{session_id}/{path}`
 - `GET /assets/viewer.js`
 - `GET /assets/style.css`
+- `GET /assets/export.js`
+- `GET /assets/katex/{path}`
 
 session は Markdown buffer ごとに作られ、memory のみに保持される。
 
@@ -82,7 +87,11 @@ inline math と display math は bundled KaTeX assets を使って browser 側�
 
 default bind address は `127.0.0.1` であり、local preview 用途を前提にする。
 
-Markdown 内の raw HTML は allowlist ベースで sanitize して render する。危険な tag、event handler attribute、安全でない URL は除去する。relative Markdown image は Markdown file の parent directory から serve し、その directory 外の path は拒否する。raw HTML 内の relative URL は image API 用に rewrite しない。
+request の `Host` header は bind address と一致する必要がある（loopback bind では `localhost`、`127.0.0.1`、`[::1]` も許可）。これにより web page からの DNS rebinding を防ぐ。`0.0.0.0` などの wildcard bind ではこの検査を行わないが、session の変更には引き続き token が必要である。viewer と export の route は推測困難な session ID で保護する。
+
+viewer と export page は inline script を使わず、CSP は server 自身からの script のみ許可する。
+
+Markdown 内の raw HTML は allowlist ベースで sanitize して render する。危険な tag、event handler attribute、安全でない URL は除去する。relative Markdown image は Markdown file の parent directory から serve し、その directory 外の path は拒否する。serve するのは画像の拡張子を持つ file のみで、画像 response には sandbox 付き CSP を付けて SVG 内の script を実行させない。raw HTML 内の relative URL は image API 用に rewrite しない。
 
 Merman は strict 設定、有限の既定リソース制限、図ごとに 5 秒の協調的な期限を使う。Markdown の sanitize 後に生成した SVG のみ画像として埋め込み、任意の raw SVG や data URL は許可しない。失敗時は該当ブロックにエスケープ済みのソースとエラーを表示する。
 

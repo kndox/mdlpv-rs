@@ -20,6 +20,8 @@ release artifact には以下を含める。
 
 `.github/workflows/ci.yml` は push と pull request で format、test、clippy を実行する。
 
+`.github/workflows/audit.yml` は push、pull request、毎週月曜 00:00 UTC に `cargo audit` を実行する。手動実行も可能。
+
 `.github/workflows/release.yml` は `v*` tag push 時に Linux、macOS、Windows 向け archive を build し、それらの archive と `SHA256SUMS` を GitHub Release に公開する。
 
 ## Repository operations

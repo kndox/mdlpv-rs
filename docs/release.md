@@ -20,6 +20,8 @@ Release artifacts contain:
 
 `.github/workflows/ci.yml` runs formatting, tests, and clippy on pushes and pull requests.
 
+`.github/workflows/audit.yml` runs `cargo audit` on pushes, pull requests, and weekly (Monday 00:00 UTC). It can also be started manually.
+
 `.github/workflows/release.yml` builds x86_64 and arm64 archives for Linux, macOS, and Windows when a `v*` tag is pushed. The workflow publishes a GitHub Release with those archives and `SHA256SUMS`.
 
 ## Repository Operations

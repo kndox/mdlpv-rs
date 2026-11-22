@@ -5,6 +5,11 @@ local config = require("mdlive.config")
 local M = {}
 
 local sessions = {}
+-- Callbacks waiting for an in-progress session creation, keyed by buffer.
+local starting = {}
+-- Per-buffer update state; only one update request is in flight at a time so
+-- the server receives buffer snapshots in order.
+local updates = {}
 local timers = {}
 local scroll_timers = {}
 local stopping = false
@@ -12,6 +17,17 @@ local augroup = vim.api.nvim_create_augroup("mdlive", { clear = true })
 
 local function notify_error(message)
   client.notify_error(message)
+end
+
+-- Sessions belong to one server launch; drop those left by a server that exited.
+local function active_session(bufnr)
+  local session = sessions[bufnr]
+  if session and session.generation ~= client.generation() then
+    sessions[bufnr] = nil
+    updates[bufnr] = nil
+    return nil
+  end
+  return session
 end
 
 local function buffer_payload(bufnr)
@@ -140,6 +156,33 @@ local function attach_autocmds(bufnr)
   })
 end
 
+-- `entry` identifies one start attempt; attempts aborted by stop are ignored here
+-- so their late callbacks cannot finish or clear a newer attempt.
+local function finish_start(bufnr, entry, err, session)
+  if starting[bufnr] ~= entry then
+    return
+  end
+  starting[bufnr] = nil
+  if err then
+    notify_error(err)
+  end
+  for _, cb in ipairs(entry.callbacks) do
+    cb(err, session)
+  end
+end
+
+local function abort_starts(err)
+  local aborted = starting
+  starting = {}
+  for _, entry in pairs(aborted) do
+    for _, cb in ipairs(entry.callbacks) do
+      vim.schedule(function()
+        cb(err)
+      end)
+    end
+  end
+end
+
 function M.start(bufnr, cb)
   bufnr = bufnr or vim.api.nvim_get_current_buf()
   if stopping then
@@ -151,54 +194,98 @@ function M.start(bufnr, cb)
     return
   end
 
+  if starting[bufnr] then
+    if cb then
+      table.insert(starting[bufnr].callbacks, cb)
+    end
+    return
+  end
+  local entry = { callbacks = { cb } }
+  starting[bufnr] = entry
+
   client.ensure_server(function(err)
+    if starting[bufnr] ~= entry then
+      return
+    end
     if err then
-      notify_error(err)
-      if cb then
-        cb(err)
-      end
+      finish_start(bufnr, entry, err)
       return
     end
 
+    -- Reuse the buffer's session unless it belongs to a server that has since exited.
+    local existing = sessions[bufnr]
+    if existing and existing.generation == client.generation() then
+      if config.options.open_browser then
+        browser.open(existing.view_url, config.options)
+      end
+      finish_start(bufnr, entry, nil, existing)
+      return
+    end
+    sessions[bufnr] = nil
+    updates[bufnr] = nil
+
+    local generation = client.generation()
     client.request("POST", "/api/session", buffer_payload(bufnr), function(req_err, response)
+      if starting[bufnr] ~= entry then
+        return
+      end
       if req_err then
-        notify_error(req_err)
-        if cb then
-          cb(req_err)
-        end
+        finish_start(bufnr, entry, req_err)
+        return
+      end
+      if client.generation() ~= generation then
+        finish_start(bufnr, entry, "session start was interrupted")
+        return
+      end
+      if not vim.api.nvim_buf_is_loaded(bufnr) then
+        client.request("DELETE", "/api/session/" .. response.session_id, nil, function() end)
+        finish_start(bufnr, entry, "buffer was unloaded before the session started")
         return
       end
       sessions[bufnr] = {
         id = response.session_id,
         view_url = response.view_url,
+        generation = generation,
       }
       attach_autocmds(bufnr)
       if config.options.open_browser then
         browser.open(response.view_url, config.options)
       end
-      if cb then
-        cb(nil, sessions[bufnr])
-      end
+      finish_start(bufnr, entry, nil, sessions[bufnr])
     end)
   end)
 end
 
 function M.update(bufnr)
   bufnr = bufnr or vim.api.nvim_get_current_buf()
-  local session = sessions[bufnr]
+  local session = active_session(bufnr)
   if not session then
     return
   end
+  local state = updates[bufnr]
+  if state and state.in_flight then
+    state.dirty = true
+    return
+  end
+  state = { in_flight = true, dirty = false }
+  updates[bufnr] = state
   client.request("POST", "/api/session/" .. session.id, buffer_payload(bufnr), function(err)
     if err then
       notify_error(err)
+    end
+    if updates[bufnr] ~= state then
+      return
+    end
+    updates[bufnr] = nil
+    if state.dirty then
+      M.update(bufnr)
     end
   end)
 end
 
 function M.scroll(bufnr)
   bufnr = bufnr or vim.api.nvim_get_current_buf()
-  local session = sessions[bufnr]
+  local session = active_session(bufnr)
   if not session or not config.options.scroll_sync then
     return
   end
@@ -212,7 +299,7 @@ end
 
 function M.open(bufnr)
   bufnr = bufnr or vim.api.nvim_get_current_buf()
-  local session = sessions[bufnr]
+  local session = active_session(bufnr)
   if not session then
     M.start(bufnr)
     return
@@ -229,7 +316,7 @@ local function default_export_path(bufnr, extension)
 end
 
 local function write_export(bufnr, output_path)
-  local session = sessions[bufnr]
+  local session = active_session(bufnr)
   if not session then
     notify_error("session is not running")
     return
@@ -260,7 +347,7 @@ local function export_with_session(bufnr, prompt, extension, write)
     if not output_path or output_path == "" then
       return
     end
-    if sessions[bufnr] then
+    if active_session(bufnr) then
       write(bufnr, output_path)
       return
     end
@@ -278,7 +365,7 @@ function M.export_html(bufnr)
 end
 
 local function write_pdf_export(bufnr, output_path)
-  local session = sessions[bufnr]
+  local session = active_session(bufnr)
   if not session then
     notify_error("session is not running")
     return
@@ -310,6 +397,7 @@ function M.close_session(bufnr, cb)
     return
   end
   sessions[bufnr] = nil
+  updates[bufnr] = nil
   close_scroll_timer(bufnr)
   client.request("DELETE", "/api/session/" .. session.id, nil, function()
     if cb then
@@ -327,6 +415,9 @@ function M.stop(cb, opts)
     return
   end
   stopping = true
+  -- Fail in-progress starts now, so a start issued after stop (e.g. restart)
+  -- launches a new server instead of joining an aborted attempt.
+  abort_starts("session start was interrupted by stop")
 
   local bufnrs = {}
   for bufnr, _ in pairs(sessions) do
@@ -354,6 +445,7 @@ function M.stop(cb, opts)
   if opts.force then
     for _, bufnr in ipairs(bufnrs) do
       sessions[bufnr] = nil
+      updates[bufnr] = nil
     end
     client.stop_server()
     stopping = false

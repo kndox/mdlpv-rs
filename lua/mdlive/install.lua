@@ -160,6 +160,28 @@ local function copy_file(source, target)
   end
 end
 
+-- Match the binary to the checked-out plugin version when it is a release tag.
+function M.release_tag(plugin_dir)
+  if not executable("git") then
+    return nil
+  end
+  local result = vim
+    .system({ "git", "-C", plugin_dir, "describe", "--tags", "--exact-match", "HEAD" }, { text = true })
+    :wait()
+  local tag = result.code == 0 and vim.trim(result.stdout or "") or ""
+  if tag:match("^v%d") then
+    return tag
+  end
+  return nil
+end
+
+function M.release_base_url(tag)
+  if tag then
+    return string.format("https://github.com/%s/%s/releases/download/%s", OWNER, REPO, tag)
+  end
+  return string.format("https://github.com/%s/%s/releases/latest/download", OWNER, REPO)
+end
+
 function M.detect_asset(uname)
   uname = uname or (vim.uv or vim.loop).os_uname()
   local os_name = normalize_os(uname.sysname)
@@ -184,7 +206,7 @@ function M.install(plugin)
   end
 
   local asset, os_name = M.detect_asset()
-  local base_url = string.format("https://github.com/%s/%s/releases/latest/download", OWNER, REPO)
+  local tag = M.release_tag(plugin.dir)
   local tmp_dir = vim.fn.tempname()
   local archive_path = tmp_dir .. "/" .. asset
   local sums_path = tmp_dir .. "/SHA256SUMS"
@@ -195,8 +217,18 @@ function M.install(plugin)
 
   vim.fn.mkdir(tmp_dir, "p")
   local ok, err = pcall(function()
-    download(base_url .. "/" .. asset, archive_path)
-    download(base_url .. "/SHA256SUMS", sums_path)
+    local function fetch(base_url)
+      download(base_url .. "/" .. asset, archive_path)
+      download(base_url .. "/SHA256SUMS", sums_path)
+    end
+    local fetched = tag and pcall(fetch, M.release_base_url(tag))
+    if not fetched then
+      -- The tag may predate prebuilt releases or still be publishing.
+      if tag then
+        vim.notify("mdlive: no release assets for " .. tag .. "; installing the latest release", vim.log.levels.WARN)
+      end
+      fetch(M.release_base_url(nil))
+    end
 
     local expected = M.checksum_for(vim.fn.readfile(sums_path), asset)
     if not expected then

@@ -11,7 +11,7 @@
 ## Data flow
 
 1. `:MdLiveStart` で Lua plugin が Rust server を起動する。
-2. Rust server は bind 後、実 port を stdout の JSON で返す。
+2. Rust server は bind 後、実 port と起動ごとの API token を stdout の JSON で返す。
 3. Lua plugin は `POST /api/session` で buffer 内容を送信する。
 4. Rust server は Markdown を HTML に render し、session を保存する。
 5. Lua plugin は `view_url` を browser で開く。

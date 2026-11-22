@@ -18,4 +18,4 @@ jobs:
       - run: cargo clippy -- -D warnings
       - run: nvim --headless -u NONE -n -l tests/lua/mdlive_spec.lua
         env:
-          NVIM_LOG_FILE: /tmp/mdlive-nvim.log
+          NVIM_LOG_FILE: /tmp/mdlpv-nvim.log

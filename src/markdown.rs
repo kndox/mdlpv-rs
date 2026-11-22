@@ -461,6 +461,35 @@ mod tests {
     }
 
     #[test]
+    fn diagram_init_cannot_override_secure_site_config() {
+        let rendered = render_markdown(
+            "```mermaid\n%%{init: {\"themeCSS\": \".mdlive-injected { fill: red }\"}}%%\nflowchart TD\nA-->B\n```",
+            None,
+        );
+        let images = svg_images(&rendered.html);
+        assert_eq!(images.len(), 1, "{}", rendered.html);
+        assert!(!images[0].contains("mdlive-injected"));
+    }
+
+    // RaTeX (merman's `math` feature) is disabled; see docs/release.md#upstream-tracking.
+    #[test]
+    fn mermaid_math_labels_report_an_error_while_body_math_renders() {
+        let rendered = render_markdown(
+            "Body $x^2$\n\n```mermaid\nflowchart LR\nA[\"$$x^2$$\"] --> B\n```",
+            None,
+        );
+        assert!(rendered.has_math);
+        assert!(
+            rendered
+                .html
+                .contains(r#"<span class="math math-inline">x^2</span>"#)
+        );
+        assert!(rendered.html.contains("mermaid-error"));
+        assert!(rendered.html.contains("capability `math`"));
+        assert!(svg_images(&rendered.html).is_empty());
+    }
+
+    #[test]
     fn image_embedding_does_not_weaken_raw_html_sanitization() {
         let rendered = render_markdown(
             r#"<img src="data:image/svg+xml;base64,PHN2Zz4=" onerror="alert(1)">

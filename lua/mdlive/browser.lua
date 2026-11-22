@@ -61,7 +61,8 @@ function M.export_pdf(url, output_path, opts, cb)
 
   table.insert(cmd, "--headless")
   table.insert(cmd, "--disable-gpu")
-  table.insert(cmd, "--no-sandbox")
+  -- Keep the browser sandbox; environments that need --no-sandbox (e.g. running
+  -- as root in a container) can add it through pdf_extra_args.
   table.insert(cmd, "--virtual-time-budget=" .. tostring(opts.pdf_virtual_time_budget_ms))
   for _, arg in ipairs(opts.pdf_extra_args or {}) do
     table.insert(cmd, arg)

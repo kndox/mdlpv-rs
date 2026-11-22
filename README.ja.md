@@ -8,7 +8,7 @@ Neovim plugin が現在の Markdown buffer を Rust server に送り、server �
 
 ## Requirements
 
-- Rust toolchain 1.95+
+- 最新の stable Rust toolchain
 - `vim.system()` を使える Neovim
 - `curl`
 - `xdg-open`、`open`、Windows `start` などの desktop browser opener
@@ -91,7 +91,7 @@ Lazy.nvim で GitHub から install する場合は、以下の形になりま�
 }
 ```
 
-この方式では Lazy.nvim が GitHub Releases の latest から環境に合う prebuilt `mdlpv-rs` binary を download し、`SHA256SUMS` で検証します。`curl` と SHA-256 計算用 command（`sha256sum`、`shasum`、または PowerShell）が必要です。Rust toolchain で source から build したい場合は、上の local checkout 例を使ってください。
+この方式では Lazy.nvim が環境に合う prebuilt `mdlpv-rs` binary を download し、`SHA256SUMS` で検証します。plugin の checkout が release tag 上にある場合（Lazy.nvim の `version` や `tag` 指定など）はその release の binary を、それ以外は latest release を使います。`SHA256SUMS` は download の破損を検出しますが同じ release から取得するため、provenance を検証する場合は `gh attestation verify <archive> --repo kndox/mdlpv-rs` を実行してください。`curl` と SHA-256 計算用 command（`sha256sum`、`shasum`、または PowerShell）が必要です。Rust toolchain で source から build したい場合は、上の local checkout 例を使ってください。
 
 ## Neovim Setup
 
@@ -126,13 +126,23 @@ Commands:
 - `:MdLiveExportHtml`
 - `:MdLiveExportPdf`
 
-通常の Neovim 終了時は `VimLeavePre` で server process に SIGTERM を送り、停止します。Neovim が強制終了された場合は cleanup が走らないため、server process が残る可能性があります。
+PDF export では headless browser の sandbox を有効なままにします。container 内で root 実行する場合など、環境上必要なときは `pdf_extra_args` に `"--no-sandbox"` を追加してください。
+
+通常の Neovim 終了時は `VimLeavePre` で server process に SIGTERM を送り、server は開いている viewer を閉じて停止します。Neovim が強制終了された場合は cleanup が走らないため、server process が残る可能性があります。
 
 ## Mermaid
 
-Mermaid fenced code block は merman 0.9.2 でサーバー側で SVG に描画し、画像として埋め込みます。JavaScript の読み込みや CDN 接続は不要で、HTML／PDF エクスポートにも同じ図が含まれます。
+Mermaid fenced code block は merman 0.11.0 でサーバー側で SVG に描画し、画像として埋め込みます。JavaScript の読み込みや CDN 接続は不要で、HTML／PDF エクスポートにも同じ図が含まれます。
 
 構文エラーやリソース制限超過時は、該当ブロックにソースとエラーを表示します。各図には merman の既定リソース制限と 5 秒の協調的な期限を適用します。HTML ラベルは SVG テキストに変換され、図のリンクや JavaScript による操作は利用できません。Mermaid.js と完全に同じ描画を保証するものではありません。
+
+Mermaid のラベル内の数式（`$$...$$`）には対応していません。merman の optional な数式 renderer（RaTeX）が unmaintained の `ttf-parser` crate に依存しているため、無効にしています。該当する図はソースとエラーを表示します。Markdown 本文の数式は影響を受けず、引き続き browser 側の KaTeX で描画します。再有効化に向けた状況は [Upstream tracking](docs/release.ja.md#upstream-tracking) を参照してください。
+
+### 0.3.0 への移行
+
+- plugin と server binary は同時に更新してください。server は session API に起動ごとの token を要求するため、古い plugin からは 0.3.0 の server を操作できません。
+- PDF export は default で `--no-sandbox` を渡さなくなりました。環境上必要な場合は `pdf_extra_args` に追加してください。
+- Mermaid は merman 0.11.0 で描画します。Mermaid のラベル内の数式（`$$...$$`）は非対応になりました。Markdown 本文の数式は変わりません。
 
 ### 0.2.0 への移行
 

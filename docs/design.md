@@ -47,8 +47,10 @@ Server defaults:
 The server prints one startup JSON line to stdout after binding:
 
 ```json
-{"host":"127.0.0.1","port":53123}
+{"host":"127.0.0.1","port":53123,"token":"<random>"}
 ```
+
+`token` is generated per server launch. The session mutation routes (`POST`/`DELETE` under `/api/session`) require `Authorization: Bearer <token>`. The Lua plugin stores the header in a private temporary file and passes it to curl with `--header @file`, so the token does not appear in process arguments.
 
 Logs are written to stderr.
 
@@ -65,8 +67,11 @@ The Neovim plugin and viewer use these server routes:
 - `GET /api/export/{session_id}`
 - `GET /events/{session_id}`
 - `GET /view/{session_id}`
+- `GET /api/image/{session_id}/{path}`
 - `GET /assets/viewer.js`
 - `GET /assets/style.css`
+- `GET /assets/export.js`
+- `GET /assets/katex/{path}`
 
 Sessions are per Markdown buffer and are stored only in memory.
 
@@ -82,7 +87,11 @@ Inline and display math are rendered in the browser with bundled KaTeX assets.
 
 The default bind address is `127.0.0.1`, and the tool is intended for local preview use.
 
-Raw HTML in Markdown is rendered through an allowlist-based sanitizer. Dangerous tags, event handler attributes, and unsafe URLs are removed. Relative Markdown images are served from the Markdown file's parent directory, and paths outside that directory are rejected. Relative URLs inside raw HTML are not rewritten to the image API.
+Requests must carry a `Host` header matching the bound address (loopback binds also accept `localhost`, `127.0.0.1`, and `[::1]`), which blocks DNS rebinding from web pages. Wildcard binds such as `0.0.0.0` skip this check; session mutation still requires the token. Viewer and export routes are guarded by the unguessable session ID.
+
+The viewer and export pages run no inline scripts; the CSP allows scripts only from the server itself.
+
+Raw HTML in Markdown is rendered through an allowlist-based sanitizer. Dangerous tags, event handler attributes, and unsafe URLs are removed. Relative Markdown images are served from the Markdown file's parent directory, and paths outside that directory are rejected. Only image file extensions are served, and image responses use a sandboxing CSP so SVG files cannot run scripts. Relative URLs inside raw HTML are not rewritten to the image API.
 
 Merman uses strict security settings, finite default resource limits, and a five-second cooperative deadline per diagram. Generated SVG is embedded as an image after Markdown sanitization, without permitting arbitrary raw SVG or data URLs. Errors show escaped source and diagnostics in the affected block.
 

@@ -11,7 +11,7 @@ The plugin has three layers: a Neovim Lua plugin, a Rust server, and a browser v
 ## Data Flow
 
 1. `:MdLiveStart` starts the Rust server.
-2. The server prints the bound host and port as one JSON line on stdout.
+2. The server prints the bound host, port, and a per-launch API token as one JSON line on stdout.
 3. The Lua plugin sends the buffer content with `POST /api/session`.
 4. The server renders Markdown to HTML and stores the session.
 5. The Lua plugin opens the returned `view_url`.
